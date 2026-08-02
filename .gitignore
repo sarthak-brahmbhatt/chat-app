@@ -1,4 +1,13 @@
+# Maven (no longer used after the Gradle migration, harmless to keep in case a
+# module ever reverts)
 target/
+
+# Gradle build output and local caches. NOTE: this deliberately does NOT ignore
+# gradlew, gradlew.bat, or gradle/wrapper/** — those wrapper files must be committed
+# so the project is buildable without Gradle pre-installed (see gradle-wrapper.properties).
+build/
+.gradle/
+
 *.class
 .idea/
 *.iml

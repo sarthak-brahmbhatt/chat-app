@@ -34,8 +34,25 @@ services:
     restart: unless-stopped
     ports:
       - "8081:8080"
+    environment:
+      # Overrides the localhost defaults baked into user-service's application.yml
+      # (spring.datasource.* / spring.data.redis.*). "mysql" and "redis" below are
+      # not hostnames in the general internet sense — they're the service names from
+      # this same docker-compose.yml, which Docker's embedded DNS resolves to the
+      # right container IP, but ONLY for other containers on this Compose network.
+      # That's why these values would be wrong (connection refused) if used from
+      # IntelliJ running outside Docker — there, the same variables are simply unset
+      # and application.yml's ${...:localhost} defaults take over instead.
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     depends_on:
       mysql:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   chat-service:
@@ -44,9 +61,6 @@ services:
     restart: unless-stopped
     ports:
       - "8082:8080"
-    depends_on:
-      redis:
-        condition: service_healthy
 
 volumes:
   mysql-data:

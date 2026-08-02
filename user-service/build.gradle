@@ -1,0 +1,84 @@
+// Gradle build script (Groovy DSL) for user-service.
+//
+// Why Gradle over Maven here: no functional requirement forced this switch — it's a
+// deliberate migration for learning purposes, same spirit as some of the other
+// choices in CLAUDE.md. Groovy DSL (build.gradle) rather than Kotlin DSL
+// (build.gradle.kts) was chosen because its syntax stays close to what most
+// Spring Boot tutorials show, which keeps this easier to read while learning.
+//
+// Structurally this file replaces pom.xml one-for-one:
+//   <parent>/<dependencyManagement>  -> the `io.spring.dependency-management` plugin
+//   <dependencies>                   -> the `dependencies { }` block
+//   spring-boot-maven-plugin         -> the `org.springframework.boot` plugin
+//   <properties><java.version>       -> `java { toolchain { ... } }`
+
+plugins {
+    // Compiles/packages plain Java code.
+    id 'java'
+
+    // Spring Boot's Gradle plugin. Among other things, it adds the `bootJar` task
+    // (produces the executable "fat jar" with an embedded server, equivalent to what
+    // spring-boot-maven-plugin's `repackage` goal did) and `bootRun` (equivalent to
+    // `mvn spring-boot:run` — this is what IntelliJ's Gradle-aware run configuration
+    // uses under the hood when you run the application class).
+    id 'org.springframework.boot' version '3.3.4'
+
+    // Without this plugin, every dependency below would need an explicit version.
+    // It reads the Spring Boot BOM (bill of materials) for 3.3.4 and pins compatible
+    // versions for every "spring-boot-starter-*" (and many third-party libs, like the
+    // MySQL driver) automatically. This is the direct equivalent of Maven's
+    // <parent>spring-boot-starter-parent</parent> inheritance.
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.chatapp'
+version = '0.0.1-SNAPSHOT'
+
+// Pins both the source/target bytecode level AND tells Gradle which JDK to use for
+// compiling this module. Using a toolchain (rather than just
+// sourceCompatibility = '21') means Gradle will locate/provision a JDK 21 itself if
+// your default JDK differs, which matters for reproducibility across machines.
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+// Where Gradle downloads dependencies from. mavenCentral() alone is enough here
+// because Spring Milestone/Snapshot repos are only needed for pre-release Boot
+// versions, not the stable 3.3.4 we're pinned to.
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // --- Web layer: exposes the register/login/list-users REST endpoints (Section 4 of CLAUDE.md) ---
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+
+    // --- Persistence: User DB (MySQL) access, per CLAUDE.md 3.5 ---
+    // spring-boot-starter-data-jpa pulls in Hibernate + Spring Data JPA repositories.
+    // mysql-connector-j is the JDBC driver Hibernate uses to actually talk to MySQL;
+    // its version is resolved by the Spring Boot BOM above, so no version pin needed here.
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    runtimeOnly 'com.mysql:mysql-connector-j'
+
+    // --- Redis: backing store for the refresh-token revocation registry, per CLAUDE.md 3.3/3.7 ---
+    // spring-boot-starter-data-redis brings in Lettuce (the default reactive/async
+    // Redis client used by Spring Boot) plus Spring Data Redis's higher-level
+    // RedisTemplate/repository support.
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+
+    // --- Ops: exposes /actuator/health etc. so we can verify the service (and its
+    // MySQL/Redis connections, once configured) is actually up in both run contexts ---
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // --- Test scope: JUnit 5 + Spring Test + Mockito, bundled together ---
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+// Tells Gradle's built-in test runner to use JUnit Platform (JUnit 5), which is what
+// spring-boot-starter-test ships. Without this, `./gradlew test` silently runs zero
+// tests because Gradle defaults to looking for JUnit 4-style tests.
+tasks.named('test') {
+    useJUnitPlatform()
+}

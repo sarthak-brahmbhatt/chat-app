@@ -1,0 +1,4 @@
+// Names this Gradle project (equivalent of <artifactId> in pom.xml). Kept in its own
+// file, separate from build.gradle, because Gradle resolves project identity/structure
+// before evaluating build logic — this matters more once a build has multiple modules.
+rootProject.name = 'chat-service'

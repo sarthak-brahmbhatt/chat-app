@@ -2,6 +2,13 @@ spring:
   application:
     name: chat-service
 
+# No datasource/Redis config here (yet). Per CLAUDE.md 3.4/3.6: chat-service's
+# eventual Message DB writes go through a Kafka consumer (build-order step 7, not in
+# scope for this migration), and its Redis use (instance registry + pub/sub for
+# routing messages across multiple Chat service instances) is explicitly deferred
+# until a single instance's connection capacity is proven insufficient. Until then,
+# this service only needs to run and report itself healthy.
+
 server:
   port: 8080
 

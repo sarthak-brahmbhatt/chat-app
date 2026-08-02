@@ -1,0 +1,6 @@
+// Names this Gradle project. This is the equivalent of <artifactId> in pom.xml —
+// it's what shows up as the module name in IntelliJ's Gradle panel and in build
+// output paths. It's a separate file from build.gradle because Gradle needs to know
+// the project's identity/structure (this matters more once a project has
+// multiple modules) before it evaluates any build logic.
+rootProject.name = 'user-service'

@@ -125,6 +125,7 @@ rather than pure production-necessity (called out where relevant).
 
 ### 3.7 Technology stack
 - **Backend**: Java (Spring Boot) for both User service and Chat service.
+- **Build tool**: Gradle for both services (migrated from Maven).
 - **Frontend**: Angular.
 - **Primary datastore**: MySQL — used for both User DB and Message DB.
 - **Registry**: Redis — proposed for the refresh-token revocation store. It also

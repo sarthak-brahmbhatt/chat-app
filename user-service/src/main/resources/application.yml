@@ -2,6 +2,57 @@ spring:
   application:
     name: user-service
 
+  # --- MySQL connection: the User DB (CLAUDE.md 3.5) ---
+  #
+  # Every value below uses Spring's ${VAR_NAME:default} property placeholder syntax:
+  # if the environment variable VAR_NAME is set, its value wins; otherwise the text
+  # after the colon is used. This single file works unmodified in both run contexts
+  # required by this migration, because nothing here is hardcoded per-environment:
+  #
+  #   - IntelliJ (run directly, outside Docker): none of MYSQL_HOST/MYSQL_PORT/etc.
+  #     are set in that process's environment, so every default kicks in ->
+  #     localhost:3306, which is exactly the host port docker-compose.yml publishes
+  #     MySQL on (see docker-compose.yml's "3306:3306" mapping). This assumes
+  #     `docker compose up` is already running for the mysql/redis containers, per
+  #     the task requirement.
+  #   - Docker container (via `docker compose up`): docker-compose.yml sets
+  #     MYSQL_HOST=mysql as a real environment variable on the user-service
+  #     container, which overrides the default. "mysql" resolves via Docker's
+  #     internal DNS to the mysql container, only reachable from inside the
+  #     same Compose network.
+  #
+  # This is the standard Spring Boot approach for environment-specific config —
+  # env-var-backed placeholders with sane local defaults — rather than maintaining
+  # a second application-docker.yml / Spring profile, since there's nothing else
+  # about the config that differs between the two contexts.
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/userdb
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:root}
+
+  jpa:
+    hibernate:
+      # Lets Hibernate create/alter tables from @Entity classes automatically at
+      # startup. Fine while there's no schema yet and we're iterating locally; once
+      # real data matters, this should be replaced with versioned migrations
+      # (Flyway/Liquibase) instead of letting Hibernate own schema changes.
+      ddl-auto: update
+    # Explicitly disables the "Open Session In View" pattern (Hibernate session kept
+    # open for the whole HTTP request). It's Spring Boot's default, but leaving it
+    # implicit prints a startup warning; we don't need lazy-loading-in-templates
+    # since this is a pure REST API, so disabling it is also the more correct choice.
+    open-in-view: false
+
+  # --- Redis connection: refresh-token revocation registry (CLAUDE.md 3.3/3.7) ---
+  # Same ${VAR:default} pattern as above, and for the same reason: no env var set
+  # (IntelliJ) -> localhost:6379, the host port docker-compose.yml publishes Redis
+  # on; REDIS_HOST=redis set by docker-compose.yml (containerized run) -> the redis
+  # container's service name on the Docker network.
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
 server:
   port: 8080
 
@@ -9,4 +60,17 @@ management:
   endpoints:
     web:
       exposure:
+        # Only "health" is exposed (not the full actuator surface like /env or
+        # /beans) — this is an internal tool, but there's still no reason to expose
+        # more than what's needed to verify liveness/connectivity.
         include: health
+  endpoint:
+    health:
+      # Without this, /actuator/health only returns a single top-level UP/DOWN.
+      # "always" breaks it down per component (db, redis, diskSpace, ...), which is
+      # exactly what lets us confirm MySQL and Redis are individually reachable —
+      # the verification step for this migration — rather than just "the JVM booted".
+      # Worth revisiting (e.g. restricting to authenticated/internal callers) once
+      # this moves past the local learning phase, since health details can leak
+      # internal topology.
+      show-details: always

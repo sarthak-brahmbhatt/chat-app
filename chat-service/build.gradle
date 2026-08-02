@@ -1,0 +1,54 @@
+// Gradle build script (Groovy DSL) for chat-service.
+//
+// See user-service/build.gradle for a fuller explanation of why Gradle + Groovy DSL
+// were chosen and how each block maps back to the old pom.xml. This file intentionally
+// does NOT declare a MySQL or Redis dependency: per CLAUDE.md 3.4/3.6, chat-service's
+// eventual MySQL writes go through a Kafka consumer (not built yet — out of scope for
+// this change) and its Redis use (instance registry + pub/sub) only becomes necessary
+// once the service scales beyond a single instance, which is explicitly deferred.
+
+plugins {
+    id 'java'
+
+    // Adds `bootJar` (executable fat-jar packaging) and `bootRun` (what IntelliJ's
+    // Gradle-aware run configuration invokes when you run the application class).
+    id 'org.springframework.boot' version '3.3.4'
+
+    // Pins transitive dependency versions via the Spring Boot 3.3.4 BOM, same role
+    // as Maven's spring-boot-starter-parent inheritance.
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.chatapp'
+version = '0.0.1-SNAPSHOT'
+
+// Pins the JDK used to compile/run this module. Using a toolchain (vs. a bare
+// sourceCompatibility string) lets Gradle auto-provision JDK 21 if it isn't already
+// the machine's default.
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Provides the STOMP/raw WebSocket support (SockJS, WebSocketHandler, etc.) that
+    // the chat connection layer (Section 3.2/4 of CLAUDE.md) will be built on.
+    implementation 'org.springframework.boot:spring-boot-starter-websocket'
+
+    // Exposes /actuator/health so we can confirm the service is up in both run
+    // contexts (IntelliJ + Docker Compose).
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+// JUnit 5 (Jupiter) is what spring-boot-starter-test ships; without this line Gradle
+// defaults to a JUnit 4 test runner and silently executes zero tests.
+tasks.named('test') {
+    useJUnitPlatform()
+}
