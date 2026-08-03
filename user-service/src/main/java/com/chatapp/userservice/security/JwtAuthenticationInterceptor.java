@@ -6,6 +6,7 @@ import io.jsonwebtoken.JwtException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -48,6 +49,22 @@ public class JwtAuthenticationInterceptor implements HandlerInterceptor {
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws IOException {
+        // CORS preflight bypass (build-order step 7, Angular frontend): a
+        // browser's automatic OPTIONS preflight request (see WebMvcConfig's
+        // addCorsMappings comment for what triggers one) NEVER carries an
+        // Authorization header — that's not an oversight on the client's
+        // part, browsers deliberately omit custom headers on preflight
+        // requests, since the whole point of the preflight is asking
+        // permission BEFORE sending the real request with its real headers.
+        // Without this bypass, every preflight to a protected endpoint would
+        // hit the "missing Authorization header" branch below and get 401'd
+        // — and a failed preflight means the browser never sends the real
+        // request at all, silently breaking the endpoint from Angular even
+        // though a valid token would've been attached to the real call.
+        if (HttpMethod.OPTIONS.matches(request.getMethod())) {
+            return true;
+        }
+
         String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
 
         if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {

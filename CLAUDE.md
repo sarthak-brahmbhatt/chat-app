@@ -64,8 +64,33 @@ rather than pure production-necessity (called out where relevant).
 - Known risk accepted: JWT is a bearer credential — anyone holding it can
   impersonate the user (XSS, network sniffing, or log/URL leakage are the main
   theft vectors). Mitigated via short token lifetime, `wss://`, and the revocation
-  registry. Storage location (localStorage vs httpOnly cookie) and CSRF protection
-  still to be decided at implementation time.
+  registry.
+- **Storage location (decided, build-order step 7 — Angular first pass):
+  in-memory only**, held as state inside Angular's `AuthService`, not
+  `localStorage`/`sessionStorage` and not a cookie. Reasoning: `localStorage` is
+  readable synchronously by any script running on the page, so a single XSS hole
+  anywhere exfiltrates the token outright; a cookie would need
+  `SameSite`/domain coordination across the dev server's origin
+  (`localhost:4200`) and the backends' origins (`localhost:8081`/`8082`) —
+  solvable, but more moving parts than this stage needs. An in-memory JS
+  variable is simply unreachable from a different origin at all, and isn't
+  sitting in a browser storage API for an XSS payload to read wholesale.
+  **Explicit tradeoff accepted**: the token — and therefore the logged-in
+  session — is lost on any full page refresh, since nothing about this
+  approach survives a reload. Acceptable for now specifically because the
+  refresh-token flow (step 10) isn't built yet either, so there's no
+  proactive re-auth mechanism this would be short-circuiting regardless of
+  storage choice. This is a decision for the CURRENT build stage, not a
+  permanent one — revisit once step 10 lands, since a real refresh-token flow
+  often pairs the *refresh* token with httpOnly-cookie storage specifically
+  (while the short-lived access token can still reasonably stay in-memory).
+  CSRF protection, also previously undecided: not a live concern under this
+  storage choice specifically — CSRF exploits the browser's automatic
+  cookie-attachment behavior, which only applies to cookie-based auth; a
+  bearer token that only exists in a page's JS memory can't be attached to a
+  request by a different, malicious origin without that origin already being
+  able to execute JS in this page's context (which is an XSS problem, not a
+  CSRF one). Revisit if/when any cookie-based auth is introduced.
 
 ### 3.4 Message persistence
 - **Kafka** sits between Chat service and the Message DB. A consumer asynchronously
@@ -77,10 +102,10 @@ rather than pure production-necessity (called out where relevant).
   necessary at this message volume/scale; a direct synchronous DB write would
   likely be fast enough. Being explicit about this tradeoff for the mentor review.
 - Tick semantics tie directly to this:
-  - **Single tick** = fired the moment the Chat service receives the message
-    (before Kafka/DB persistence).
-  - **Double tick** = fired only after the receiving user's client acknowledges
-    delivery.
+    - **Single tick** = fired the moment the Chat service receives the message
+      (before Kafka/DB persistence).
+    - **Double tick** = fired only after the receiving user's client acknowledges
+      delivery.
 - Kinesis Data Streams considered as the AWS-native analog to Kafka (ordered
   within a shard, replayable) for later cloud-native comparison. SNS considered
   and rejected for this specific job — it's fan-out pub/sub with no ordering or
@@ -125,7 +150,6 @@ rather than pure production-necessity (called out where relevant).
 
 ### 3.7 Technology stack
 - **Backend**: Java (Spring Boot) for both User service and Chat service.
-- **Build tool**: Gradle for both services (migrated from Maven).
 - **Frontend**: Angular.
 - **Primary datastore**: MySQL — used for both User DB and Message DB.
 - **Registry**: Redis — proposed for the refresh-token revocation store. It also
@@ -186,8 +210,15 @@ rather than pure production-necessity (called out where relevant).
 4. List users endpoint
 5. Basic WebSocket connect + echo (JWT validated at handshake)
 6. Send/receive message + single tick
-7. Kafka async persistence to Message DB
-8. Double tick (delivery acknowledgment)
-9. Refresh token flow
-10. Load testing to validate single-instance connection capacity
-11. AWS deployment (single instance first, ALB/ASG later if justified by #10)
+7. Angular frontend, first pass — covers everything built through step 6: register form,
+   login form, user list with "Start Chat" buttons, and a basic chat window (send/receive
+    + single tick visible live). This is the first end-to-end demoable milestone — nothing
+      visual existed before this point; all prior steps were verified via Postman/scripts only.
+8. Kafka async persistence
+9. Double tick
+10. Refresh token flow
+11. Load testing to validate single-instance connection capacity
+12. AWS deployment (single instance first, ALB/ASG later if justified by #11)
+13. Angular frontend, second pass — wire up whatever changed/added in steps 8-11 that the
+    UI needs to reflect (e.g. nothing structural expected from Kafka/refresh tokens, since
+    those are backend-internal, but double tick needs a visual state in the chat window)

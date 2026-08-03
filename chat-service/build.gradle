@@ -44,6 +44,18 @@ dependencies {
     // contexts (IntelliJ + Docker Compose).
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
 
+    // --- JWT verification: validates tokens issued by user-service at WebSocket
+    // handshake time (CLAUDE.md 3.3, build-order step 5). Same jjwt library and
+    // version as user-service, for the same reasoning (see user-service's
+    // JwtService class comment) — but chat-service only ever VERIFIES tokens, never
+    // issues them, so its own JwtValidator class is deliberately smaller than
+    // user-service's JwtService (no generateAccessToken/TTL exposure). This is a
+    // small, intentional duplication rather than a shared module — see the
+    // explanation given alongside this change for the tradeoff.
+    implementation 'io.jsonwebtoken:jjwt-api:0.12.6'
+    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
+    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.12.6'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 

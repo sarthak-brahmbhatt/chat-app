@@ -1,0 +1,28 @@
+<div class="page chat-page">
+  <h1>Chat with {{ recipientLabel }}</h1>
+
+  <div class="messages">
+    @for (bubble of bubbles(); track bubble.messageId) {
+      <div class="bubble" [class.sent]="bubble.direction === 'sent'" [class.received]="bubble.direction === 'received'">
+        <span>{{ bubble.content }}</span>
+        <!-- Single-tick indicator: '…' while waiting for the server's ack,
+             '✓' once it arrives. Matches CLAUDE.md 3.4's tick semantics —
+             this only ever means "the server received it," not "the
+             recipient has seen it" (that's double tick, step 9). -->
+        @if (bubble.direction === 'sent') {
+          <span class="tick">{{ bubble.ticked ? '✓' : '…' }}</span>
+        }
+      </div>
+    }
+  </div>
+
+  <div class="composer">
+    <input
+      #messageInput
+      type="text"
+      placeholder="Type a message…"
+      (keyup.enter)="send(messageInput.value); messageInput.value = ''"
+    />
+    <button (click)="send(messageInput.value); messageInput.value = ''">Send</button>
+  </div>
+</div>

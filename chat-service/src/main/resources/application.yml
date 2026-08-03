@@ -9,6 +9,24 @@ spring:
 # until a single instance's connection capacity is proven insufficient. Until then,
 # this service only needs to run and report itself healthy.
 
+# --- JWT verification secret (CLAUDE.md 3.3, build-order step 5) ---
+# MUST be byte-identical to user-service's jwt.secret (see
+# user-service/src/main/resources/application.yml) — chat-service only VERIFIES
+# tokens issued by user-service, never issues its own. If these two values ever
+# diverge, every token chat-service receives fails signature verification, and the
+# only visible symptom is "every WebSocket connection gets rejected as invalid" —
+# nothing points at a secret mismatch specifically, so this is worth remembering.
+#
+# In Docker Compose, this is enforced structurally: both services read JWT_SECRET
+# from the same YAML anchor in docker-compose.yml (&jwt-secret), so there's exactly
+# one literal value, not two independently-set ones that happen to match. Running
+# natively (IntelliJ, no docker-compose involved), there's no equivalent structural
+# guarantee — the default below must be kept byte-for-byte identical to
+# user-service's default by hand. If you ever rotate this secret for real, set the
+# SAME JWT_SECRET environment variable in both services' native run configuration.
+jwt:
+  secret: ${JWT_SECRET:dev-only-insecure-jwt-signing-secret-change-me-before-any-real-deployment}
+
 server:
   port: 8080
 
