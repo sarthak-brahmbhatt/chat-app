@@ -3,6 +3,7 @@ package com.chatapp.chatservice.websocket;
 import com.chatapp.chatservice.dto.ChatMessageRequest;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
+import com.chatapp.chatservice.kafka.ChatMessagePublisher;
 import com.chatapp.chatservice.security.JwtValidator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -21,7 +22,7 @@ import java.util.Optional;
 
 /**
  * The WebSocket connection lifecycle, and how this class hooks into it
- * (CLAUDE.md 3.1/3.3/3.4, build-order steps 5-6):
+ * (CLAUDE.md 3.1/3.3/3.4, build-order steps 5-6, 8):
  *
  *   1. HANDSHAKE — a client opens a WebSocket by sending a normal HTTP GET
  *      request with an "Upgrade: websocket" header. Spring's WebSocket
@@ -67,11 +68,17 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final JwtValidator jwtValidator;
     private final ConnectionRegistry connectionRegistry;
     private final ObjectMapper objectMapper;
+    private final ChatMessagePublisher chatMessagePublisher;
 
-    public ChatWebSocketHandler(JwtValidator jwtValidator, ConnectionRegistry connectionRegistry, ObjectMapper objectMapper) {
+    public ChatWebSocketHandler(
+            JwtValidator jwtValidator,
+            ConnectionRegistry connectionRegistry,
+            ObjectMapper objectMapper,
+            ChatMessagePublisher chatMessagePublisher) {
         this.jwtValidator = jwtValidator;
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
+        this.chatMessagePublisher = chatMessagePublisher;
     }
 
     @Override
@@ -131,17 +138,22 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     /**
      * Parses an authenticated session's message as a ChatMessageRequest
      * (CLAUDE.md 3.1) and routes it:
-     *   1. Single-tick the sender FIRST, before attempting delivery at all —
-     *      per CLAUDE.md 3.4, single tick means "the server received this,"
-     *      not "it reached the recipient." Whether delivery below succeeds,
-     *      fails, or never finds a connected recipient doesn't change the
-     *      fact that the server already has the message — the ack reflects
-     *      that fact, not the delivery outcome.
-     *   2. Look up the recipient in ConnectionRegistry. If they're currently
-     *      connected (to THIS instance — see ConnectionRegistry's class
-     *      comment for why that qualifier matters), deliver live. If not,
-     *      that's expected at this build step (no offline queue yet) — not
-     *      an error, nothing more happens.
+     *   1. Single-tick the sender FIRST, before anything else at all — per
+     *      CLAUDE.md 3.4, single tick means "the server received this," not
+     *      "it reached the recipient" or "it's durably saved." This is the
+     *      one ordering rule in this method that's non-negotiable: nothing
+     *      below this line may run before it, and nothing below it may ever
+     *      delay it (see ChatMessagePublisher's class comment for how the
+     *      Kafka publish specifically guarantees that).
+     *   2. Publish to Kafka (ChatMessagePublisher) and 3. attempt live
+     *      delivery (ConnectionRegistry) are TWO INDEPENDENT things that
+     *      both happen to this same message — not two steps of one
+     *      pipeline. Neither depends on the other's outcome: a Kafka outage
+     *      doesn't affect live delivery, and the recipient being offline
+     *      doesn't affect whether the message gets published for later
+     *      persistence. The order they're called in below doesn't matter
+     *      for the same reason — swapping them would change nothing
+     *      observable.
      *
      * Malformed input (invalid JSON, or missing messageId/recipientId) is
      * logged and dropped rather than closing the connection — unlike a bad
@@ -165,6 +177,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String senderId = (String) session.getAttributes().get(USER_ID_ATTRIBUTE);
 
         sendSingleTickAck(session, request.messageId());
+        chatMessagePublisher.publish(senderId, request);
         deliverIfRecipientConnected(senderId, request);
     }
 

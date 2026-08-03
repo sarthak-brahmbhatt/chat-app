@@ -2,12 +2,18 @@ package com.chatapp.chatservice.websocket;
 
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
+import com.chatapp.chatservice.repository.ChatMessageRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.boot.autoconfigure.data.jpa.JpaRepositoriesAutoConfiguration;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
+import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -40,12 +46,37 @@ import static org.assertj.core.api.Assertions.assertThat;
  * rather than relying on this test happening to know (and staying in sync
  * with) application.yml's real default — tokens built in this test are
  * signed with that exact same test value.
+ *
+ * @EnableAutoConfiguration(exclude = ...) (added alongside build-order step
+ * 8, when chat-service first gained a real MySQL dependency): this test has
+ * nothing to do with the database, but without excluding JPA/DataSource
+ * auto-configuration, @SpringBootTest would try to eagerly open a real
+ * MySQL connection at context startup just to satisfy Hibernate/HikariCP —
+ * unlike Kafka (whose consumer container starts its lifecycle without
+ * blocking on an actual successful broker connection, retrying in the
+ * background instead), a DataSource connection pool DOES try to establish
+ * a real connection up front, so this test would otherwise silently start
+ * depending on Docker's MySQL being up, for no reason relevant to what it
+ * actually verifies.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@EnableAutoConfiguration(exclude = {
+        DataSourceAutoConfiguration.class,
+        HibernateJpaAutoConfiguration.class,
+        JpaRepositoriesAutoConfiguration.class
+})
 @TestPropertySource(properties = "jwt.secret=test-only-integration-secret-at-least-32-bytes-long-xyz")
 class ChatWebSocketIntegrationTest {
 
     private static final String SECRET = "test-only-integration-secret-at-least-32-bytes-long-xyz";
+
+    // ChatMessageConsumer (a real bean in this full-context test) depends on
+    // ChatMessageRepository — with JPA excluded above, nothing would
+    // otherwise satisfy that dependency, so it's provided as a mock here
+    // purely to let the context wire up. This test never interacts with it
+    // directly; ChatMessageConsumerTest covers that class's own behavior.
+    @MockBean
+    private ChatMessageRepository chatMessageRepository;
 
     // Spring Boot always publishes the embedded server's actual bound port
     // under this property when webEnvironment = RANDOM_PORT.

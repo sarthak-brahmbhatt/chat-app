@@ -42,6 +42,85 @@ services:
       timeout: 5s
       retries: 5
 
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    container_name: chat-app-kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      # --- KRaft mode: why there's no separate ZooKeeper container ---
+      # Older Kafka used a separate ZooKeeper cluster purely to elect a
+      # "controller" broker and store cluster metadata (which topics/
+      # partitions exist, who's leader for each, etc.). KRaft (Kafka Raft)
+      # replaces that entire job with a Raft consensus protocol built
+      # directly into Kafka itself — the same process can now play BOTH the
+      # broker role (handling actual produce/consume traffic) and the
+      # controller role (the old ZooKeeper job) at once. That dual role is
+      # exactly what KAFKA_PROCESS_ROLES: 'broker,controller' below turns on,
+      # and it's why this single container replaces what used to be two.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      # This node names itself as the one and only voter in its own
+      # controller quorum — correct for a single-node dev cluster; a real
+      # multi-node production cluster would list several nodes here so the
+      # controller role survives any one of them going down.
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      # Three listeners this broker accepts connections on: CONTROLLER
+      # carries KRaft's own internal consensus traffic (never used by our
+      # application code directly); PLAINTEXT is for OTHER CONTAINERS on
+      # this Compose network (chat-service, when containerized — reaches
+      # this broker via the service name "kafka"); PLAINTEXT_HOST is for
+      # anything OUTSIDE Docker (a natively-run chat-service, or you
+      # inspecting a topic from your own machine).
+      KAFKA_LISTENERS: 'CONTROLLER://:29093,PLAINTEXT_HOST://:9092,PLAINTEXT://:19092'
+      # The address a client is actually TOLD to use for every request after
+      # its first connection — this is the setting that trips people up: you
+      # connect to whatever KAFKA_LISTENERS exposes, but Kafka immediately
+      # hands back THIS value as "the real address for everything from here
+      # on," so if it's wrong, the connection silently breaks on the second
+      # request, not the first. Same dual-mode reasoning as MySQL/Redis's
+      # ${VAR:localhost} pattern elsewhere in this file: a containerized
+      # chat-service is told "kafka:19092" (Docker's internal DNS), a
+      # natively-run one is told "localhost:9092" (the published host port).
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      # Which listener brokers use to talk to EACH OTHER — meaningless with
+      # only one broker, but Kafka requires it to be set regardless.
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      # A fixed cluster ID (any valid-looking base64 string; this one has no
+      # special meaning) rather than a randomly generated one, so this
+      # cluster's identity is reproducible across `docker compose down`/`up`
+      # cycles instead of silently becoming a "new" cluster each time.
+      CLUSTER_ID: 'ciWo7IWazngRchmPES6q5A=='
+      # Every *_REPLICATION_FACTOR / *_MIN_ISR setting below governs one of
+      # Kafka's own INTERNAL bookkeeping topics (consumer offsets,
+      # transaction state, etc.), all forced down to 1 because we only have
+      # ONE broker — a replication factor higher than the broker count makes
+      # Kafka refuse to create that internal topic at all, and the broker
+      # won't start cleanly. This is purely a "we only have one broker"
+      # accommodation, not a statement about our own chat-messages topic
+      # (see KafkaTopicConfig.java for that).
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      # Skips Kafka's default artificial delay before the first consumer
+      # group rebalance (normally there to let multiple consumers join
+      # together before assigning partitions) — irrelevant with our single
+      # consumer instance, and just slows down local dev/restarts for no
+      # benefit here.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
   user-service:
     build: ./user-service
     container_name: chat-app-user-service
@@ -77,10 +156,24 @@ services:
     ports:
       - "8082:8080"
     environment:
-      # No MySQL/Redis host wiring needed here (see chat-service/build.gradle) — this
-      # service currently has exactly one cross-cutting config need, verifying JWTs
-      # issued by user-service, which is why this is the only environment entry.
       JWT_SECRET: *jwt-secret
+      # Same dual-mode reasoning as user-service's MYSQL_* block: these are
+      # only real, resolvable hostnames from INSIDE this Compose network.
+      # chat-service now writes to messagedb (build-order step 8) — the same
+      # MySQL container/instance user-service already uses, just a different
+      # database within it (see mysql-init/01-init-databases.sql).
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      # "kafka:19092" is the PLAINTEXT listener above — the one meant for
+      # other containers, not the PLAINTEXT_HOST one published to the host.
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
 volumes:
   mysql-data:

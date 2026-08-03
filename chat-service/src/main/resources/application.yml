@@ -2,12 +2,64 @@ spring:
   application:
     name: chat-service
 
-# No datasource/Redis config here (yet). Per CLAUDE.md 3.4/3.6: chat-service's
-# eventual Message DB writes go through a Kafka consumer (build-order step 7, not in
-# scope for this migration), and its Redis use (instance registry + pub/sub for
-# routing messages across multiple Chat service instances) is explicitly deferred
-# until a single instance's connection capacity is proven insufficient. Until then,
-# this service only needs to run and report itself healthy.
+  # --- MySQL connection: the Message DB (messagedb), CLAUDE.md 3.5, build-order
+  # step 8 --- Same ${VAR:default} dual-mode pattern as user-service's datasource
+  # config: MYSQL_HOST unset (native run) -> localhost:3306, the host port
+  # docker-compose.yml publishes MySQL on; MYSQL_HOST=mysql (containerized run,
+  # set by docker-compose.yml) -> the mysql container's Docker-DNS name. Points at
+  # messagedb specifically, not userdb — a different database in the SAME MySQL
+  # instance user-service already uses (see mysql-init/01-init-databases.sql,
+  # which created both databases back at build-order step 1).
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/messagedb
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:root}
+
+  jpa:
+    hibernate:
+      # Same tradeoff/caveat as user-service: fine while iterating locally with
+      # no real data at stake; a real deployment should use versioned migrations
+      # (Flyway/Liquibase) instead of letting Hibernate own schema changes.
+      ddl-auto: update
+    open-in-view: false
+
+  # --- Kafka: async message persistence (CLAUDE.md 3.4, build-order step 8) ---
+  kafka:
+    # Same dual-mode reasoning as everything else in this file: unset (native run)
+    # -> localhost:9092 (Kafka's PLAINTEXT_HOST listener, published to the host by
+    # docker-compose.yml); KAFKA_BOOTSTRAP_SERVERS=kafka:19092 (containerized run,
+    # set by docker-compose.yml) -> Kafka's PLAINTEXT listener, reachable only from
+    # other containers on the Compose network. "Bootstrap" servers are just the
+    # initial contact point(s) the client uses to discover the rest of the
+    # cluster's metadata — with a single broker here, it's also the only one.
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      # Keys/values are sent as raw bytes on the wire — a serializer is what turns
+      # our Java objects into those bytes. String keys (see ChatMessagePublisher's
+      # conversation-key) need only the standard StringSerializer; the value is a
+      # whole ChatMessageEvent object, serialized as JSON via Spring Kafka's
+      # JsonSerializer (backed by the same Jackson already used everywhere else
+      # in this project for HTTP/WebSocket JSON).
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      # The consumer GROUP this listener belongs to — Kafka tracks "how far has
+      # group X read topic Y" per group, and if multiple consumer instances ever
+      # share this same group id, Kafka automatically splits the topic's
+      # partitions between them (so each message is processed by exactly one
+      # instance in the group, not all of them). One instance today, but this id
+      # is what a second chat-service instance would need to share to cooperate
+      # on consuming rather than each independently re-processing every message.
+      group-id: chat-service-message-persister
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        # JsonDeserializer refuses to instantiate a class it doesn't explicitly
+        # trust, by default — a safety guard against blindly deserializing
+        # arbitrary bytes from a topic into arbitrary Java classes. Since
+        # producer and consumer are the same codebase here, trusting our own
+        # kafka package is exactly as far as this needs to go.
+        spring.json.trusted.packages: com.chatapp.chatservice.kafka
 
 # --- JWT verification secret (CLAUDE.md 3.3, build-order step 5) ---
 # MUST be byte-identical to user-service's jwt.secret (see

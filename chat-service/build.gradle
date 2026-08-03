@@ -1,11 +1,14 @@
 // Gradle build script (Groovy DSL) for chat-service.
 //
 // See user-service/build.gradle for a fuller explanation of why Gradle + Groovy DSL
-// were chosen and how each block maps back to the old pom.xml. This file intentionally
-// does NOT declare a MySQL or Redis dependency: per CLAUDE.md 3.4/3.6, chat-service's
-// eventual MySQL writes go through a Kafka consumer (not built yet — out of scope for
-// this change) and its Redis use (instance registry + pub/sub) only becomes necessary
-// once the service scales beyond a single instance, which is explicitly deferred.
+// were chosen and how each block maps back to the old pom.xml.
+//
+// As of build-order step 8, this file DOES declare a MySQL dependency — the first
+// one chat-service has ever had. Per CLAUDE.md 3.4/3.6, chat-service's MySQL writes
+// go through a Kafka consumer (this step), which is why that dependency wasn't here
+// before now. Redis (instance registry + pub/sub) is still absent — that only
+// becomes necessary once the service scales beyond a single instance, which is
+// still explicitly deferred.
 
 plugins {
     id 'java'
@@ -56,7 +59,30 @@ dependencies {
     runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
     runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.12.6'
 
+    // --- Kafka: async message persistence (CLAUDE.md 3.4, build-order step 8) ---
+    // spring-kafka wraps the plain Apache Kafka Java client with Spring-idiomatic
+    // pieces: KafkaTemplate (used by ChatMessagePublisher to produce) and
+    // @KafkaListener (used by ChatMessageConsumer to consume) — the same
+    // "annotate a method, Spring wires the plumbing" pattern as @KafkaListener's
+    // cousins elsewhere in Spring (@Scheduled, @EventListener, etc.).
+    implementation 'org.springframework.kafka:spring-kafka'
+
+    // --- Persistence: the Message DB (messagedb), written by ChatMessageConsumer.
+    // Same two dependencies as user-service's User DB access (see
+    // user-service/build.gradle for the fuller explanation of each) — this is a
+    // completely separate database from userdb, just the same MySQL container/
+    // instance, per CLAUDE.md 3.5. ---
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    runtimeOnly 'com.mysql:mysql-connector-j'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+
+    // --- Test scope: @EmbeddedKafka spins up a real, temporary, in-process Kafka
+    // broker for a single test run — no Docker required for this specific test.
+    // This is what lets KafkaEndToEndTest prove the producer/consumer wiring
+    // (topic name, (de)serializers, trusted packages, consumer group) genuinely
+    // works, rather than just asserting against mocks of Spring Kafka's own classes.
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
 }
 
 // JUnit 5 (Jupiter) is what spring-boot-starter-test ships; without this line Gradle
