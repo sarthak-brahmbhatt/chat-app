@@ -1,5 +1,6 @@
 package com.chatapp.chatservice.websocket;
 
+import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
 import com.chatapp.chatservice.repository.ChatMessageRepository;
@@ -205,6 +206,54 @@ class ChatWebSocketIntegrationTest {
         String deliveredJson = recipientHandler.receivedMessages.poll(5, TimeUnit.SECONDS);
         IncomingChatMessage delivered = OBJECT_MAPPER.readValue(deliveredJson, IncomingChatMessage.class);
         assertThat(delivered).isEqualTo(new IncomingChatMessage("incoming_message", "m-int-2", "101", "hey 202, it's 101"));
+
+        senderSession.close();
+        recipientSession.close();
+    }
+
+    /**
+     * Extends the sibling two-connection test above with the double-tick
+     * round trip (build-order step 9): once the recipient's client has the
+     * delivered message in hand, it acknowledges automatically (same as
+     * Angular's ChatService does in the real app), and the original sender
+     * should receive a tick: "double" ack over their still-open connection.
+     */
+    @Test
+    void deliveredAck_fromConnectedRecipient_sendsDoubleTickToSenderOverRealSockets() throws Exception {
+        StandardWebSocketClient client = new StandardWebSocketClient();
+
+        RecordingClientHandler senderHandler = new RecordingClientHandler();
+        WebSocketSession senderSession = client.execute(senderHandler, wsUri()).get(5, TimeUnit.SECONDS);
+        senderSession.sendMessage(new TextMessage(tokenFor("301")));
+
+        RecordingClientHandler recipientHandler = new RecordingClientHandler();
+        WebSocketSession recipientSession = client.execute(recipientHandler, wsUri()).get(5, TimeUnit.SECONDS);
+        recipientSession.sendMessage(new TextMessage(tokenFor("402")));
+
+        // See the sibling test above for why this wait exists — no
+        // auth-success ack in this protocol to synchronize on instead.
+        Thread.sleep(300);
+
+        senderSession.sendMessage(new TextMessage(
+                "{\"type\":\"message\",\"messageId\":\"m-int-3\",\"recipientId\":\"402\",\"content\":\"double-tick me\"}"));
+
+        // Drain the single-tick and the delivered message — both already
+        // covered by the sibling test; here they're just setup for what
+        // this test actually verifies below.
+        senderHandler.receivedMessages.poll(5, TimeUnit.SECONDS);
+        String deliveredJson = recipientHandler.receivedMessages.poll(5, TimeUnit.SECONDS);
+        IncomingChatMessage delivered = OBJECT_MAPPER.readValue(deliveredJson, IncomingChatMessage.class);
+
+        // The recipient's client acknowledges delivery automatically — same
+        // as ChatService.ts does the instant it receives an incoming_message,
+        // no user action involved.
+        String deliveredAckJson = OBJECT_MAPPER.writeValueAsString(
+                new DeliveredAck("delivered_ack", delivered.messageId(), delivered.senderId()));
+        recipientSession.sendMessage(new TextMessage(deliveredAckJson));
+
+        String doubleTickJson = senderHandler.receivedMessages.poll(5, TimeUnit.SECONDS);
+        TickAck doubleTick = OBJECT_MAPPER.readValue(doubleTickJson, TickAck.class);
+        assertThat(doubleTick).isEqualTo(TickAck.doubleTick("m-int-3"));
 
         senderSession.close();
         recipientSession.close();

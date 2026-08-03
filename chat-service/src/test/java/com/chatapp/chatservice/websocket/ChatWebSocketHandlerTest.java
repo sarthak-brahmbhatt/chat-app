@@ -1,5 +1,6 @@
 package com.chatapp.chatservice.websocket;
 
+import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
 import com.chatapp.chatservice.kafka.ChatMessageEvent;
@@ -318,5 +319,49 @@ class ChatWebSocketHandlerTest {
         assertThat(eventCaptor.getValue().senderId()).isEqualTo("42");
         assertThat(eventCaptor.getValue().recipientId()).isEqualTo("99");
         assertThat(eventCaptor.getValue().content()).isEqualTo("hi there");
+    }
+
+    // --- CLAUDE.md 3.1/3.4, build-order step 9: double tick ---
+
+    @Test
+    void handleTextMessage_deliveredAckForConnectedSender_sendsDoubleTickToSender() throws Exception {
+        WebSocketSession senderSession = authenticatedSession("42");
+        WebSocketSession recipientSession = authenticatedSession("99");
+
+        // The recipient's client sends this automatically upon receiving an
+        // incoming_message — senderId is echoed back from that message (see
+        // DeliveredAck's class comment for why it's client-supplied).
+        String deliveredAckJson = """
+                {"type":"delivered_ack","messageId":"m-1","senderId":"42"}
+                """;
+        handler.handleTextMessage(recipientSession, new TextMessage(deliveredAckJson));
+
+        ArgumentCaptor<TextMessage> senderCaptor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(senderSession).sendMessage(senderCaptor.capture());
+        TickAck ack = objectMapper.readValue(senderCaptor.getValue().getPayload(), TickAck.class);
+        assertThat(ack).isEqualTo(TickAck.doubleTick("m-1"));
+    }
+
+    @Test
+    void handleTextMessage_deliveredAckForDisconnectedSender_silentlyDropsWithoutExceptionOrCrash() throws Exception {
+        WebSocketSession recipientSession = authenticatedSession("99");
+        // "42" (the original sender) is deliberately never authenticated in
+        // this test — simulates them having disconnected by the time this
+        // ack arrives, so ConnectionRegistry.find("42") comes back empty.
+
+        String deliveredAckJson = """
+                {"type":"delivered_ack","messageId":"m-2","senderId":"42"}
+                """;
+
+        // No try/catch here on purpose: if handleDeliveredAck let an
+        // exception escape for this case, this call itself would fail the
+        // test with an unexpected exception.
+        handler.handleTextMessage(recipientSession, new TextMessage(deliveredAckJson));
+
+        // The recipient's own session (the one that sent the ack) must be
+        // completely unaffected by the sender being gone — no error
+        // response back to them, and definitely no close.
+        verify(recipientSession, never()).sendMessage(any());
+        verify(recipientSession, never()).close(any());
     }
 }

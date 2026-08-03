@@ -2,7 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import { Observable, Subject, filter } from 'rxjs';
 import { CHAT_SERVICE_WS_URL } from './api-config';
 import { AuthService } from './auth.service';
-import { ChatMessageRequest, IncomingChatMessage, ServerChatEvent, TickAck } from '../models/chat.models';
+import { ChatMessageRequest, DeliveredAck, IncomingChatMessage, ServerChatEvent, TickAck } from '../models/chat.models';
 
 /**
  * Owns one WebSocket connection to chat-service and turns its raw messages
@@ -81,6 +81,16 @@ export class ChatService {
     this.socket.addEventListener('message', (event: MessageEvent<string>) => {
       const parsed = JSON.parse(event.data) as ServerChatEvent;
       this.eventsSubject.next(parsed);
+
+      // Double tick (build-order step 9): the instant this client receives
+      // a live-delivered message, it confirms that automatically — no user
+      // action, no "mark as read" button. This is what makes double tick
+      // mean "reached the device," the same as WhatsApp, rather than "the
+      // user opened the chat" (that's a read receipt / blue tick, still out
+      // of scope — CLAUDE.md section 5).
+      if (parsed.type === 'incoming_message') {
+        this.sendDeliveredAck(parsed);
+      }
     });
 
     this.socket.addEventListener('close', (event: CloseEvent) => {
@@ -108,6 +118,28 @@ export class ChatService {
     const request: ChatMessageRequest = { type: 'message', messageId, recipientId, content };
     this.socket.send(JSON.stringify(request));
     return messageId;
+  }
+
+  /**
+   * senderId is just read back off the IncomingChatMessage we already
+   * received — see chat.models.ts's DeliveredAck comment and
+   * chat-service's DeliveredAck.java for why the client supplies it rather
+   * than chat-service tracking a messageId -> senderId map of its own.
+   * Not exposed as a public method: nothing outside this class should ever
+   * need to send one directly, since it's entirely a reaction to a message
+   * arriving, not a user-triggered action like sendMessage() is.
+   */
+  private sendDeliveredAck(message: IncomingChatMessage): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      // The socket closed in the gap between receiving the message and
+      // acknowledging it — nothing useful to do; the sender simply won't
+      // get a double tick for this message, same as any other
+      // "recipient's connection dropped" case in this protocol.
+      return;
+    }
+
+    const ack: DeliveredAck = { type: 'delivered_ack', messageId: message.messageId, senderId: message.senderId };
+    this.socket.send(JSON.stringify(ack));
   }
 
   disconnect(): void {

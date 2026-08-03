@@ -118,6 +118,16 @@ button.secondary {
   opacity: 0.8;
 }
 
+/* Double-tick visual state (build-order step 9) — deliberately NOT blue.
+   Blue specifically means a READ receipt in the WhatsApp mental model,
+   which is explicitly out of scope (CLAUDE.md section 5); this only means
+   "delivered." Full opacity + bold is enough to read as "further along"
+   than the dim single tick, without implying something we don't do. */
+.tick-double {
+  opacity: 1;
+  font-weight: 700;
+}
+
 .composer {
   display: flex;
   gap: 0.5rem;

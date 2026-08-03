@@ -14,7 +14,7 @@
  * UserSummary.id before using it as a recipientId — see ChatService.
  */
 
-export type ChatMessageType = 'message' | 'ack' | 'incoming_message';
+export type ChatMessageType = 'message' | 'ack' | 'incoming_message' | 'delivered_ack';
 
 // Client -> Server: send a chat message.
 export interface ChatMessageRequest {
@@ -24,9 +24,8 @@ export interface ChatMessageRequest {
   content: string;
 }
 
-// Server -> Sender: tick acknowledgment. `tick` is 'single' only for now —
-// 'double' arrives in build-order step 9 and isn't handled by ChatComponent
-// yet (explicitly out of scope for this pass).
+// Server -> Sender: tick acknowledgment. `tick: 'double'` arrives once the
+// recipient's client sends a DeliveredAck back (build-order step 9).
 export interface TickAck {
   type: 'ack';
   tick: 'single' | 'double';
@@ -39,6 +38,17 @@ export interface IncomingChatMessage {
   messageId: string;
   senderId: string;
   content: string;
+}
+
+// Client -> Server (build-order step 9): sent automatically by ChatService
+// the instant it receives an IncomingChatMessage — no user action involved.
+// senderId is just echoed back from that IncomingChatMessage; see
+// chat-service's DeliveredAck.java for the full reasoning on why the
+// client supplies it rather than the server tracking it itself.
+export interface DeliveredAck {
+  type: 'delivered_ack';
+  messageId: string;
+  senderId: string;
 }
 
 /** A discriminated union of everything the server can send after auth succeeds. */

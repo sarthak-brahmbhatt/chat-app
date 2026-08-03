@@ -1,6 +1,7 @@
 package com.chatapp.chatservice.websocket;
 
 import com.chatapp.chatservice.dto.ChatMessageRequest;
+import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
 import com.chatapp.chatservice.kafka.ChatMessagePublisher;
@@ -22,7 +23,7 @@ import java.util.Optional;
 
 /**
  * The WebSocket connection lifecycle, and how this class hooks into it
- * (CLAUDE.md 3.1/3.3/3.4, build-order steps 5-6, 8):
+ * (CLAUDE.md 3.1/3.3/3.4, build-order steps 5-6, 8-9):
  *
  *   1. HANDSHAKE — a client opens a WebSocket by sending a normal HTTP GET
  *      request with an "Upgrade: websocket" header. Spring's WebSocket
@@ -38,10 +39,10 @@ import java.util.Optional;
  *   3. handleTextMessage — fires once per text frame the client sends, for
  *      as long as the session stays open. The FIRST message received on a
  *      session is always treated as the auth token (see authenticate()), not
- *      chat content. Every message after that is a chat-message envelope
- *      (see handleChatMessage()) — parsed, single-tick acknowledged back to
- *      the sender immediately, then routed live to the recipient if they're
- *      currently connected.
+ *      chat content. Every message after that is a JSON envelope with a
+ *      `type` field (CLAUDE.md 3.1) — either a "message" (see
+ *      handleChatMessage()) or a "delivered_ack" (see handleDeliveredAck()),
+ *      dispatched on that field (see routeAuthenticatedMessage()).
  *   4. afterConnectionClosed — fires once, whenever the session ends, for
  *      any reason (client disconnected, this handler closed it, network
  *      dropped). This is also where the session gets removed from
@@ -93,8 +94,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      *     ConnectionRegistry, and stop; this message was auth, not chat
      *     content, so nothing is echoed for it. Invalid -> close the
      *     connection; no further messages on this session are ever processed.
-     *   - Already authenticated: parse the message as a chat-message envelope
-     *     and route it (see handleChatMessage()).
+     *   - Already authenticated: dispatch on the envelope's `type` field
+     *     (see routeAuthenticatedMessage()).
      */
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws IOException {
@@ -103,7 +104,32 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        handleChatMessage(session, message.getPayload());
+        routeAuthenticatedMessage(session, message.getPayload());
+    }
+
+    /**
+     * Every post-auth envelope carries a `type` field (CLAUDE.md 3.1) — this
+     * peeks at just that field (via a generic JSON tree, not deserializing
+     * into any specific record yet) to decide which specific type to parse
+     * the SAME payload into next. This is a deliberately lightweight
+     * alternative to Jackson's polymorphic-deserialization annotations
+     * (@JsonTypeInfo etc.), proportionate to having exactly two
+     * client-originated types so far.
+     */
+    private void routeAuthenticatedMessage(WebSocketSession session, String payload) throws IOException {
+        String type;
+        try {
+            type = objectMapper.readTree(payload).path("type").asText();
+        } catch (JsonProcessingException e) {
+            log.warn("Dropping unparseable message on session {}: {}", session.getId(), e.getMessage());
+            return;
+        }
+
+        switch (type) {
+            case "message" -> handleChatMessage(session, payload);
+            case "delivered_ack" -> handleDeliveredAck(session, payload);
+            default -> log.warn("Dropping message with unrecognized type '{}' on session {}", type, session.getId());
+        }
     }
 
     private boolean isAuthenticated(WebSocketSession session) {
@@ -202,6 +228,54 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             // this send). This doesn't affect the sender — their single tick
             // was already sent — so this is just logged, not propagated.
             log.warn("Failed to deliver message {} to recipient {}: {}", request.messageId(), request.recipientId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Handles a delivered_ack (CLAUDE.md 3.1, build-order step 9) — the
+     * recipient's client confirming an incoming_message actually reached it.
+     * senderId comes from the client (see DeliveredAck's class comment for
+     * why that's a deliberate, accepted tradeoff rather than chat-service
+     * tracking its own messageId -> senderId map).
+     *
+     * If the original sender is no longer connected, the double-tick is
+     * SILENTLY DROPPED — there is no channel left to deliver it over. This
+     * isn't a new gap: with no offline-message-queue (out of scope),
+     * double-tick was already only ever meaningful for a sender who's still
+     * live to receive it — if the recipient hadn't been connected at
+     * delivery time either, the message was never delivered live in the
+     * first place (see deliverIfRecipientConnected above), so there would
+     * have been nothing to double-tick regardless.
+     */
+    private void handleDeliveredAck(WebSocketSession session, String payload) {
+        DeliveredAck ack;
+        try {
+            ack = objectMapper.readValue(payload, DeliveredAck.class);
+        } catch (JsonProcessingException e) {
+            log.warn("Dropping unparseable delivered_ack on session {}: {}", session.getId(), e.getMessage());
+            return;
+        }
+
+        if (isBlank(ack.messageId()) || isBlank(ack.senderId())) {
+            log.warn("Dropping delivered_ack with missing messageId/senderId on session {}", session.getId());
+            return;
+        }
+
+        Optional<WebSocketSession> senderSession = connectionRegistry.find(ack.senderId());
+        if (senderSession.isEmpty()) {
+            log.info("Sender {} no longer connected; double-tick for message {} dropped", ack.senderId(), ack.messageId());
+            return;
+        }
+
+        try {
+            TickAck doubleTick = TickAck.doubleTick(ack.messageId());
+            senderSession.get().sendMessage(new TextMessage(objectMapper.writeValueAsString(doubleTick)));
+        } catch (IOException e) {
+            // Same reasoning as deliverIfRecipientConnected's catch: the
+            // sender's socket looked connected a moment ago but failed on
+            // send. Logged, not propagated — this doesn't affect the
+            // CURRENT session (the recipient who sent the ack) at all.
+            log.warn("Failed to deliver double-tick for message {} to sender {}: {}", ack.messageId(), ack.senderId(), e.getMessage());
         }
     }
 

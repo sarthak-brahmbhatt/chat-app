@@ -8,9 +8,12 @@ interface ChatBubble {
   messageId: string;
   direction: 'sent' | 'received';
   content: string;
-  // Only meaningful for 'sent' bubbles — whether the single-tick ack has
-  // arrived yet. Double tick (step 9) isn't handled here; out of scope.
-  ticked: boolean;
+  // Only meaningful for 'sent' bubbles: 'pending' until the server's
+  // single-tick ack arrives, 'single' until the recipient's delivered_ack
+  // round-trips back as a double-tick ack (build-order step 9), 'double'
+  // once it does. 'received' bubbles just carry 'pending' unused — the
+  // template only ever reads this for 'sent' bubbles.
+  tickState: 'pending' | 'single' | 'double';
 }
 
 @Component({
@@ -46,7 +49,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     // means a message arriving from some OTHER user (a different
     // conversation entirely) is deliberately ignored here. A real inbox
     // that surfaces messages from anyone regardless of which chat window is
-    // open is out of scope for this pass.
+    // open is out of scope for this pass. Sending the delivered_ack that
+    // eventually produces the sender's double tick happens automatically
+    // inside ChatService itself (see its 'message' listener) — nothing
+    // needed here for that part.
     this.chatService.incomingMessages$
       .pipe(
         filter((message) => message.senderId === this.recipientId),
@@ -55,13 +61,16 @@ export class ChatComponent implements OnInit, OnDestroy {
       .subscribe((message) => {
         this.bubbles.update((current) => [
           ...current,
-          { messageId: message.messageId, direction: 'received', content: message.content, ticked: false },
+          { messageId: message.messageId, direction: 'received', content: message.content, tickState: 'pending' },
         ]);
       });
 
+    // A TickAck's own `tick` field is already exactly 'single' | 'double' —
+    // the same union ChatBubble.tickState uses — so it can be assigned
+    // straight across without any translation.
     this.chatService.tickAcks$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((ack) => {
       this.bubbles.update((current) =>
-        current.map((bubble) => (bubble.messageId === ack.messageId ? { ...bubble, ticked: true } : bubble)),
+        current.map((bubble) => (bubble.messageId === ack.messageId ? { ...bubble, tickState: ack.tick } : bubble)),
       );
     });
   }
@@ -73,7 +82,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
 
     const messageId = this.chatService.sendMessage(this.recipientId, content);
-    this.bubbles.update((current) => [...current, { messageId, direction: 'sent', content, ticked: false }]);
+    this.bubbles.update((current) => [...current, { messageId, direction: 'sent', content, tickState: 'pending' }]);
   }
 
   ngOnDestroy(): void {

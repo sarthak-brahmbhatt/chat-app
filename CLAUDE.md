@@ -27,8 +27,70 @@ rather than pure production-necessity (called out where relevant).
 ### 3.1 Protocol
 - **XMPP dropped.** Plain WebSocket is used for real-time chat. This means we own
   the entire message/ack payload format ourselves — no XMPP stanza vocabulary to
-  lean on. Payload/ack schema is not yet designed (see Open Questions).
+  lean on.
 - BOSH is not relevant — native WebSocket support is universal now.
+- **Message/ack payload schema (decided, build-order steps 6 & 9).** After the JWT
+  auth message (step 5 — always the raw token string, no envelope, and always the
+  first message on a connection), every subsequent WebSocket message is a JSON
+  envelope with a `type` field so a client (or the server) can dispatch without
+  inspecting which other fields are present. Four shapes so far:
+  - Client → Server, send a message:
+    ```json
+    { "type": "message", "messageId": "<client-generated>", "recipientId": "<userId>", "content": "..." }
+    ```
+    `messageId` is deliberately **client-generated** (e.g. a UUID), not
+    server-assigned — a WhatsApp-style chat window (section 2) needs to render
+    the outgoing bubble optimistically before any server round trip, and a
+    client-generated id is what a client can correlate that bubble to a later
+    tick update with, without waiting on the server first. This id is a
+    correlation token for the live round trip, not a permanent record id —
+    step 8's Kafka/DB persistence assigns its own separate primary key; don't
+    conflate the two.
+  - Server → Sender, tick acknowledgment:
+    ```json
+    { "type": "ack", "tick": "single" | "double", "messageId": "<echoed back>" }
+    ```
+    One `ack` shape with a `tick` field rather than separate message types per
+    tick — single/double are two states of one concept, not two unrelated
+    events. Single tick fires the moment Chat service receives the message
+    (see 3.4), before attempting delivery or persistence. Double tick fires
+    only once the RECIPIENT's client has actually confirmed delivery (see
+    `delivered_ack` below) — not merely "the recipient was connected."
+  - Server → Recipient, a delivered message:
+    ```json
+    { "type": "incoming_message", "messageId": "<same id>", "senderId": "<userId>", "content": "..." }
+    ```
+    A distinct `type` from the client→server shape even though the payload is
+    nearly identical (`recipientId` swapped for `senderId`) — dispatch should
+    never require inferring direction from which fields happen to be present.
+  - Client → Server, delivered acknowledgment (**new, step 9**):
+    ```json
+    { "type": "delivered_ack", "messageId": "<the id being acknowledged>", "senderId": "<original sender's userId>" }
+    ```
+    Sent automatically by the RECIPIENT's client the instant it receives an
+    `incoming_message` — no user action required. This mirrors WhatsApp's
+    actual double-tick semantics: "reached the device," not "the user opened
+    it" (read receipts/blue tick remain explicitly out of scope, section 5).
+    `senderId` is echoed back by the client (it's already present in the
+    `incoming_message` just received) rather than tracked server-side in a
+    messageId → senderId map — a deliberate choice to avoid Chat service
+    holding state that grows per undelivered/unacked message and needs its
+    own cleanup/expiry, for a value the client already has for free.
+    **Accepted tradeoff**: this trusts the client not to lie about `senderId`.
+    A forged value can only cause a spurious double-tick delivered to some
+    other connected user for a `messageId` their own client doesn't recognize
+    (a harmless no-op on the receiving end) — consistent with this project's
+    existing bearer-token trust model for an internal-only tool (3.3). Revisit
+    if this protocol is ever exposed to less-trusted clients.
+  - **If the original sender has disconnected by the time a `delivered_ack`
+    arrives**, the double-tick is silently dropped — there is no live
+    connection left to deliver it over, and this is not a new gap: with no
+    offline-message-queue (explicitly out of scope, section 5), double tick
+    was already only ever meaningful for a sender who's still connected to
+    receive it. If the recipient hadn't been connected at delivery time
+    either, the message was never delivered live in the first place, so
+    there'd have been nothing to double-tick regardless of whether the
+    sender stuck around.
 
 ### 3.2 Service boundaries
 - **User service** (stateless, HTTP): Register, Login, List Users. Originally
@@ -146,7 +208,7 @@ rather than pure production-necessity (called out where relevant).
   revisit if a different store fits better once implementation starts.
 - **Async message persistence**: Kafka, as decided in 3.4.
 - **Real-time transport**: WebSocket with a custom (non-XMPP) message/ack
-  payload protocol (schema still TBD — see Open Questions).
+  payload protocol — schema decided, see 3.1.
 - **Design intent**: the stack should scale from a single EC2 instance today to
   ALB + ASG + externalized Redis registry later without a rewrite — i.e. avoid
   building anything into the Chat service that assumes in-memory-only state
@@ -173,7 +235,6 @@ rather than pure production-necessity (called out where relevant).
 - OAuth 2.0 delegation model
 - Read receipts (blue tick)
 - Detailed HA/DR design
-- Full custom WebSocket message/ack payload schema (not yet designed)
 - Multi-instance registry + pub/sub implementation (only needed once single-instance
   capacity is proven insufficient)
 
