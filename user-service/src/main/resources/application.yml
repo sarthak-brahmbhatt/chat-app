@@ -53,6 +53,21 @@ spring:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
 
+# --- JWT signing secret + access token lifetime (CLAUDE.md 3.3, build-order step 3) ---
+# Same ${VAR:default} externalized-config pattern as the MySQL/Redis settings above,
+# but for a different reason. Those needed genuinely different values per run
+# context (container hostname vs localhost). This secret does NOT need to differ
+# between Docker and IntelliJ — nothing about it is environment-topology-dependent,
+# so it deliberately isn't overridden in docker-compose.yml the way MYSQL_HOST/
+# REDIS_HOST are. The point of externalizing it isn't "differs per environment,"
+# it's "never hardcode a signing secret in source control" — the default below is
+# obviously a local-dev-only placeholder, so a real deployment is forced to set
+# JWT_SECRET explicitly rather than silently inheriting a secret sitting in git
+# history. Must be at least 32 bytes (256 bits) for HMAC-SHA256 — see JwtService.
+jwt:
+  secret: ${JWT_SECRET:dev-only-insecure-jwt-signing-secret-change-me-before-any-real-deployment}
+  access-token-expiration-minutes: ${JWT_ACCESS_TOKEN_EXPIRATION_MINUTES:15}
+
 server:
   port: 8080
 
