@@ -1,3 +1,17 @@
+# "x-" prefixed top-level keys are a Docker Compose "extension field" — Compose
+# itself ignores this key entirely (it's not a real service/volume/etc.), which is
+# exactly what makes it a safe place to define a YAML anchor (&jwt-secret) purely for
+# reuse elsewhere in this same file via an alias (*jwt-secret). user-service (issues
+# tokens) and chat-service (verifies them) both need this EXACT same value — see
+# user-service/src/main/java/.../security/JwtService.java and
+# chat-service/src/main/java/.../security/JwtValidator.java. Defining it once here
+# and referencing it from both services' environment blocks means there is
+# structurally one value, not two independently-typed-out strings that merely happen
+# to match today. This only covers Docker Compose runs, though — see the jwt.secret
+# comment in each service's application.yml for how native/IntelliJ runs (where this
+# file isn't involved at all) have to keep their defaults in sync by hand instead.
+x-jwt-secret: &jwt-secret dev-only-insecure-jwt-signing-secret-change-me-before-any-real-deployment
+
 services:
   mysql:
     image: mysql:8.0
@@ -49,6 +63,7 @@ services:
       MYSQL_PASSWORD: root
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      JWT_SECRET: *jwt-secret
     depends_on:
       mysql:
         condition: service_healthy
@@ -61,6 +76,11 @@ services:
     restart: unless-stopped
     ports:
       - "8082:8080"
+    environment:
+      # No MySQL/Redis host wiring needed here (see chat-service/build.gradle) — this
+      # service currently has exactly one cross-cutting config need, verifying JWTs
+      # issued by user-service, which is why this is the only environment entry.
+      JWT_SECRET: *jwt-secret
 
 volumes:
   mysql-data:

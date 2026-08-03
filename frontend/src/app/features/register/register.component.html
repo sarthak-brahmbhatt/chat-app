@@ -1,0 +1,45 @@
+<div class="page">
+  <h1>Register</h1>
+
+  <!--
+    (ngSubmit) fires on the form's native submit event (Enter key or a
+    submit button) rather than a click handler on the button directly — the
+    standard Angular pattern, works regardless of which control had focus.
+  -->
+  <form [formGroup]="form" (ngSubmit)="onSubmit()">
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" type="text" formControlName="username" />
+    </div>
+
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" type="password" formControlName="password" />
+    </div>
+
+    <div class="field">
+      <label for="firstName">First name</label>
+      <input id="firstName" type="text" formControlName="firstName" />
+    </div>
+
+    <div class="field">
+      <label for="lastName">Last name (optional)</label>
+      <input id="lastName" type="text" formControlName="lastName" />
+    </div>
+
+    <!--
+      @if is Angular's built-in control-flow syntax (17+), replacing the
+      older *ngIf structural directive — same effect, no separate directive
+      import needed.
+    -->
+    @if (errorMessage()) {
+      <p class="error">{{ errorMessage() }}</p>
+    }
+
+    <button type="submit" [disabled]="submitting()">
+      {{ submitting() ? 'Registering…' : 'Register' }}
+    </button>
+  </form>
+
+  <p class="hint">Already have an account? <a routerLink="/login">Log in</a></p>
+</div>
