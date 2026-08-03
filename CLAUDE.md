@@ -64,33 +64,8 @@ rather than pure production-necessity (called out where relevant).
 - Known risk accepted: JWT is a bearer credential — anyone holding it can
   impersonate the user (XSS, network sniffing, or log/URL leakage are the main
   theft vectors). Mitigated via short token lifetime, `wss://`, and the revocation
-  registry.
-- **Storage location (decided, build-order step 7 — Angular first pass):
-  in-memory only**, held as state inside Angular's `AuthService`, not
-  `localStorage`/`sessionStorage` and not a cookie. Reasoning: `localStorage` is
-  readable synchronously by any script running on the page, so a single XSS hole
-  anywhere exfiltrates the token outright; a cookie would need
-  `SameSite`/domain coordination across the dev server's origin
-  (`localhost:4200`) and the backends' origins (`localhost:8081`/`8082`) —
-  solvable, but more moving parts than this stage needs. An in-memory JS
-  variable is simply unreachable from a different origin at all, and isn't
-  sitting in a browser storage API for an XSS payload to read wholesale.
-  **Explicit tradeoff accepted**: the token — and therefore the logged-in
-  session — is lost on any full page refresh, since nothing about this
-  approach survives a reload. Acceptable for now specifically because the
-  refresh-token flow (step 10) isn't built yet either, so there's no
-  proactive re-auth mechanism this would be short-circuiting regardless of
-  storage choice. This is a decision for the CURRENT build stage, not a
-  permanent one — revisit once step 10 lands, since a real refresh-token flow
-  often pairs the *refresh* token with httpOnly-cookie storage specifically
-  (while the short-lived access token can still reasonably stay in-memory).
-  CSRF protection, also previously undecided: not a live concern under this
-  storage choice specifically — CSRF exploits the browser's automatic
-  cookie-attachment behavior, which only applies to cookie-based auth; a
-  bearer token that only exists in a page's JS memory can't be attached to a
-  request by a different, malicious origin without that origin already being
-  able to execute JS in this page's context (which is an XSS problem, not a
-  CSRF one). Revisit if/when any cookie-based auth is introduced.
+  registry. Storage location (localStorage vs httpOnly cookie) and CSRF protection
+  still to be decided at implementation time.
 
 ### 3.4 Message persistence
 - **Kafka** sits between Chat service and the Message DB. A consumer asynchronously
@@ -110,9 +85,19 @@ rather than pure production-necessity (called out where relevant).
   within a shard, replayable) for later cloud-native comparison. SNS considered
   and rejected for this specific job — it's fan-out pub/sub with no ordering or
   replay, which doesn't satisfy the durability requirement.
-- Open/parked: Kafka's own availability as a failure point, and cross-partition
-  message ordering for a single conversation — acknowledged as solvable, not yet
-  designed in detail.
+- **Partitioning/ordering (resolved, step 8)**: messages are keyed by a
+  canonical, sender-order-independent pair (`min(userId1,userId2):max(userId1,userId2)`),
+  not by sender alone. This guarantees every message in a given conversation —
+  regardless of direction — lands on the same Kafka partition, which is what
+  actually preserves send-order, since Kafka only guarantees ordering within a
+  single partition, not across partitions or across different keys.
+- **Kafka availability as a failure point (decided, step 8)**: if the publish
+  to Kafka fails outright (not just slow), that message is not retried or
+  persisted anywhere — it's accepted as lost for the purposes of this project.
+  The sender still gets their single tick regardless (that's the whole point
+  of the async design), but there is currently no dead-letter queue, retry
+  policy, or outbox pattern to recover a failed publish. Flagged as a known,
+  deliberate scope limit — not a gap to silently carry forward.
 
 ### 3.5 Data stores
 - **User DB**: users, credentials.
@@ -189,7 +174,6 @@ rather than pure production-necessity (called out where relevant).
 - Read receipts (blue tick)
 - Detailed HA/DR design
 - Full custom WebSocket message/ack payload schema (not yet designed)
-- Exact Kafka partitioning/ordering strategy
 - Multi-instance registry + pub/sub implementation (only needed once single-instance
   capacity is proven insufficient)
 
