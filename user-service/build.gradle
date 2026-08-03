@@ -72,6 +72,34 @@ dependencies {
     // MySQL/Redis connections, once configured) is actually up in both run contexts ---
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
 
+    // --- Bean Validation: powers @NotBlank/@Valid on RegisterRequest (register
+    // endpoint, CLAUDE.md section 2/4). Not bundled with spring-boot-starter-web by
+    // default since Spring Boot 2.3 — Hibernate Validator (the actual implementation
+    // behind the jakarta.validation annotations) has to be pulled in explicitly.
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+
+    // --- Password hashing: BCryptPasswordEncoder for the register endpoint.
+    // Deliberately spring-security-crypto (just the hashing utilities) rather than
+    // spring-boot-starter-security: the latter auto-configures a security filter
+    // chain that requires a login for every endpoint by default, which would break
+    // /register and /actuator/health right now. JWT-based auth (CLAUDE.md 3.3) is a
+    // later build-order step (#3) — full Spring Security config belongs there, not here.
+    implementation 'org.springframework.security:spring-security-crypto'
+
+    // --- JWT: issues short-lived access tokens for the login endpoint (CLAUDE.md
+    // 3.3, build-order step 3). Library choice explained in full in JwtService's
+    // class comment — in short, jjwt over Spring Security's OAuth2 resource server
+    // support, because this service issues/verifies its own tokens directly rather
+    // than delegating to a separate authorization server, and CLAUDE.md 3.3 already
+    // explicitly ruled out the OAuth2 delegation model for this project. jjwt-api is
+    // what application code compiles against (JwtService imports from it);
+    // jjwt-impl and jjwt-jackson are the actual signing implementation and JSON
+    // (de)serialization for claims — needed at runtime, but application code never
+    // references them directly, hence runtimeOnly rather than implementation.
+    implementation 'io.jsonwebtoken:jjwt-api:0.12.6'
+    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6'
+    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.12.6'
+
     // --- Test scope: JUnit 5 + Spring Test + Mockito, bundled together ---
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
