@@ -2,7 +2,10 @@ package com.chatapp.userservice.controller;
 
 import com.chatapp.userservice.dto.LoginRequest;
 import com.chatapp.userservice.dto.LoginResponse;
+import com.chatapp.userservice.dto.RefreshRequest;
+import com.chatapp.userservice.dto.RefreshResponse;
 import com.chatapp.userservice.exception.InvalidCredentialsException;
+import com.chatapp.userservice.exception.InvalidRefreshTokenException;
 import com.chatapp.userservice.security.JwtService;
 import com.chatapp.userservice.service.AuthService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -67,8 +70,8 @@ class AuthControllerTest {
     }
 
     @Test
-    void login_withValidCredentials_returns200WithAccessToken() throws Exception {
-        LoginResponse response = new LoginResponse("fake.jwt.token", 900);
+    void login_withValidCredentials_returns200WithAccessAndRefreshToken() throws Exception {
+        LoginResponse response = new LoginResponse("fake.jwt.token", "fake.refresh.token", 900);
         when(authService.login(any(LoginRequest.class))).thenReturn(response);
 
         mockMvc.perform(post("/login")
@@ -76,6 +79,7 @@ class AuthControllerTest {
                         .content(loginRequestJson("alice", "correct-password")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accessToken").value("fake.jwt.token"))
+                .andExpect(jsonPath("$.refreshToken").value("fake.refresh.token"))
                 .andExpect(jsonPath("$.tokenType").value("Bearer"))
                 .andExpect(jsonPath("$.expiresInSeconds").value(900));
     }
@@ -103,5 +107,51 @@ class AuthControllerTest {
                 // wrong-password test above — verifying there is no way for a
                 // client to tell the two cases apart from the response alone.
                 .andExpect(jsonPath("$.message").value("Invalid username or password"));
+    }
+
+    private String refreshRequestJson(String refreshToken) throws Exception {
+        RefreshRequest request = new RefreshRequest();
+        request.setRefreshToken(refreshToken);
+        return objectMapper.writeValueAsString(request);
+    }
+
+    @Test
+    void refresh_withValidToken_returns200WithNewTokenPair() throws Exception {
+        RefreshResponse response = new RefreshResponse("new.access.token", "new.refresh.token", 900);
+        when(authService.refresh("old.refresh.token")).thenReturn(response);
+
+        mockMvc.perform(post("/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(refreshRequestJson("old.refresh.token")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accessToken").value("new.access.token"))
+                .andExpect(jsonPath("$.refreshToken").value("new.refresh.token"))
+                .andExpect(jsonPath("$.tokenType").value("Bearer"))
+                .andExpect(jsonPath("$.expiresInSeconds").value(900));
+    }
+
+    @Test
+    void refresh_withInvalidToken_returns401WithGenericMessage() throws Exception {
+        // Covers both "not found/expired" and "reuse detected" from the
+        // controller's point of view — AuthService/RefreshTokenService only
+        // ever hand this controller ONE exception type for every such case
+        // (see InvalidRefreshTokenException), so there's nothing here that
+        // could leak which one actually happened.
+        when(authService.refresh("stale.refresh.token")).thenThrow(new InvalidRefreshTokenException());
+
+        mockMvc.perform(post("/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(refreshRequestJson("stale.refresh.token")))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.message").value("Invalid refresh token"));
+    }
+
+    @Test
+    void refresh_withBlankToken_returns400() throws Exception {
+        mockMvc.perform(post("/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(refreshRequestJson("")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("refreshToken is required"));
     }
 }

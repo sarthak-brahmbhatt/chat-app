@@ -68,6 +68,18 @@ jwt:
   secret: ${JWT_SECRET:dev-only-insecure-jwt-signing-secret-change-me-before-any-real-deployment}
   access-token-expiration-minutes: ${JWT_ACCESS_TOKEN_EXPIRATION_MINUTES:15}
 
+# --- Refresh token lifetime (CLAUDE.md 3.3, build-order step 10) ---
+# A separate top-level key from `jwt:` above, deliberately: the refresh token
+# itself is NOT a JWT (see RefreshTokenService for why — an opaque random
+# value checked against Redis, not a signed/self-contained token), so nesting
+# it under `jwt:` would misleadingly imply otherwise. 7 days: long enough that
+# an actively-used internal tool doesn't force a fresh login every day, short
+# enough to bound how long a stolen refresh token stays useful — a deliberate
+# middle ground for a ~10,000-employee internal tool, not a public consumer
+# app where 30+ day silent sessions are common for retention reasons.
+refresh-token:
+  expiration-days: ${REFRESH_TOKEN_EXPIRATION_DAYS:7}
+
 server:
   port: 8080
 

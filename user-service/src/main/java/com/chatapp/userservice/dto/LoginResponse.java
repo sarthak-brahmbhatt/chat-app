@@ -10,22 +10,32 @@ package com.chatapp.userservice.dto;
  * doesn't have to guess or hardcode that convention itself later.
  *
  * expiresInSeconds is included so client code can proactively plan
- * re-authentication (or, once it exists, a token refresh) without first
- * having to decode the JWT itself just to find its own expiry.
+ * re-authentication without first having to decode the JWT itself just to
+ * find its own expiry.
+ *
+ * refreshToken (build-order step 10): the longer-lived token to present to
+ * POST /refresh once the access token above expires — see
+ * RefreshTokenService for the full design.
  */
 public class LoginResponse {
 
     private String accessToken;
+    private String refreshToken;
     private String tokenType = "Bearer";
     private long expiresInSeconds;
 
-    public LoginResponse(String accessToken, long expiresInSeconds) {
+    public LoginResponse(String accessToken, String refreshToken, long expiresInSeconds) {
         this.accessToken = accessToken;
+        this.refreshToken = refreshToken;
         this.expiresInSeconds = expiresInSeconds;
     }
 
     public String getAccessToken() {
         return accessToken;
+    }
+
+    public String getRefreshToken() {
+        return refreshToken;
     }
 
     public String getTokenType() {

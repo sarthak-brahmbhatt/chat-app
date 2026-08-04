@@ -72,4 +72,17 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleInvalidCredentials(InvalidCredentialsException ex) {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(new ErrorResponse(ex.getMessage()));
     }
+
+    /**
+     * Fired by RefreshTokenService on POST /refresh (build-order step 10) —
+     * see InvalidRefreshTokenException for why every failure case (not
+     * found, expired, or detected reuse) collapses to this one exception
+     * before it ever reaches here. Same 401 reasoning as
+     * handleInvalidCredentials: authentication (here, "prove you hold a
+     * valid refresh token") is what failed, not authorization.
+     */
+    @ExceptionHandler(InvalidRefreshTokenException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidRefreshToken(InvalidRefreshTokenException ex) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(new ErrorResponse(ex.getMessage()));
+    }
 }

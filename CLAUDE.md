@@ -106,10 +106,48 @@ rather than pure production-necessity (called out where relevant).
   delegated third-party authorization, which doesn't apply here (single app, single
   org, no delegation). JWT alone (issued by User service, verified independently by
   any service) is the right fit.
-- **Access token**: short-lived (minutes).
-- **Refresh token**: longer-lived, used only against a `/refresh` endpoint, checked
-  against a revocable registry (supports revocation + rotation — each use issues a
-  new refresh token and invalidates the old one).
+- **Access token**: short-lived (15 minutes — see user-service's
+  `jwt.access-token-expiration-minutes`).
+- **Refresh token (fully decided, build-order step 10)**: longer-lived, used only
+  against a `/refresh` endpoint, checked against a revocable registry.
+  - **Format**: opaque, cryptographically random (256 bits via `SecureRandom`),
+    deliberately NOT a JWT. Unlike the access token, a refresh token is checked
+    against a store on every single use anyway (that's what "revocable registry"
+    means) — there's nothing to gain from making it self-contained/stateless the
+    way the access token needs to be, and an opaque value can't be tampered with
+    (there are no claims in it to forge).
+  - **Lifetime: 7 days.** Long enough that an actively-used internal tool doesn't
+    force a daily re-login; short enough to bound how long a stolen refresh token
+    stays useful. A deliberate middle ground for a ~10,000-employee internal tool
+    — not a public consumer app, where 30+ day silent sessions are common
+    specifically for retention reasons that don't apply here.
+  - **Store**: Redis, keyed by SHA-256(token) — never the raw token value — with a
+    TTL matching the lifetime above, so an expired one is simply gone with no
+    manual cleanup. A fast, un-salted hash, deliberately NOT bcrypt: this is 256
+    bits of already-high-entropy random data, not a low-entropy human-chosen
+    secret vulnerable to dictionary/brute-force attack, so bcrypt's deliberate
+    slowness (the whole reason it's used for passwords) buys nothing here. Hashing
+    at all exists so that IF Redis itself were ever compromised (a leaked backup,
+    misconfigured access), an attacker would see only hashes, not directly-usable
+    bearer credentials — worth one extra hash call given this token lives for days,
+    a much larger exposure window than the access token's 15 minutes.
+  - **Rotation**: every successful `/refresh` call issues a brand-new access +
+    refresh token pair and invalidates the presented refresh token. "Invalidates"
+    specifically means marked rotated and left to expire naturally, not deleted
+    outright — deleting it would make a REPLAY of that same token indistinguishable
+    from a token that never existed, losing the ability to detect reuse at all.
+  - **Reuse detection (decided, step 10)**: presenting an already-rotated refresh
+    token again is treated as a theft signal. The response is to revoke the ENTIRE
+    token family — including whichever token is CURRENTLY valid for that chain —
+    not just reject the replay. Reasoning: once a token has been used twice, the
+    server can no longer tell whether the legitimate user or an attacker is
+    holding the current valid token (whoever rotated first "won" that round is
+    unknowable from here), so the safe response is to kill the whole chain and
+    force a fresh login — bounding a detected compromise to one wasted round trip,
+    rather than leaving a window where a stolen, already-rotated-forward token
+    might still work. Both "invalid/expired" and "reuse detected" return the
+    identical 401 + message — no signal to the caller distinguishing which
+    happened, same anti-enumeration reasoning as /login's identical-message design.
 - **Token delivery to Chat service**: browsers can't set custom headers on the
   WebSocket handshake request, so the token is passed at handshake time / as the
   first message immediately after the socket opens (query-param approach rejected
@@ -220,7 +258,11 @@ rather than pure production-necessity (called out where relevant).
   User DB for duplicate username → inserts → 201 Created, or 400 on missing
   fields/duplicate.
 - `POST /login` (username, password) → User service verifies against User DB →
-  issues access + refresh JWT → 200 OK, or 401 on mismatch.
+  issues an access token (JWT) + refresh token (opaque, see 3.3) → 200 OK, or 401
+  on mismatch.
+- `POST /refresh` (refresh token) → User service validates + rotates it against
+  Redis (see 3.3) → issues a new access + refresh token pair → 200 OK, or 401 if
+  the presented token is invalid, expired, or a detected reuse of a rotated token.
 - `GET /users` (JWT in header) → User service fetches all users from User DB →
   200 OK + list, or an appropriate "no users" message if empty.
 - Chat flow (WebSocket, assumes both browsers hold an authenticated connection):
@@ -264,6 +306,9 @@ rather than pure production-necessity (called out where relevant).
 10. Refresh token flow
 11. Load testing to validate single-instance connection capacity
 12. AWS deployment (single instance first, ALB/ASG later if justified by #11)
-13. Angular frontend, second pass — wire up whatever changed/added in steps 8-11 that the
-    UI needs to reflect (e.g. nothing structural expected from Kafka/refresh tokens, since
-    those are backend-internal, but double tick needs a visual state in the chat window)
+13. Angular frontend, second pass — double tick's visual state was already bundled into
+    step 9 directly (seeing it live immediately mattered more than waiting for this pass).
+    Remaining scope: wire AuthService to call `POST /refresh` when the access token
+    expires (the WebSocket connection force-disconnects at that point, per step 5's
+    server-enforced-expiry design — CLAUDE.md 3.3), store the newly-issued access +
+    refresh token pair, then reconnect the WebSocket with the fresh access token.

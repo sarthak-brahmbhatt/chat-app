@@ -2,10 +2,13 @@ package com.chatapp.userservice.service;
 
 import com.chatapp.userservice.dto.LoginRequest;
 import com.chatapp.userservice.dto.LoginResponse;
+import com.chatapp.userservice.dto.RefreshResponse;
 import com.chatapp.userservice.entity.User;
 import com.chatapp.userservice.exception.InvalidCredentialsException;
+import com.chatapp.userservice.exception.InvalidRefreshTokenException;
 import com.chatapp.userservice.repository.UserRepository;
 import com.chatapp.userservice.security.JwtService;
+import com.chatapp.userservice.security.RefreshTokenService;
 import io.jsonwebtoken.Claims;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -55,6 +58,15 @@ class AuthServiceTest {
     @Spy
     private PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
+    // RefreshTokenService is mocked directly here, not backed by a real Redis
+    // double the way JwtService is real crypto — its own rotation/reuse-
+    // detection/family-revocation logic is thoroughly covered by
+    // RefreshTokenServiceTest instead. This class only needs to verify
+    // AuthService's OWN job: does it call RefreshTokenService correctly and
+    // assemble the response from what comes back.
+    @Mock
+    private RefreshTokenService refreshTokenService;
+
     private JwtService jwtService;
     private AuthService authService;
 
@@ -64,7 +76,7 @@ class AuthServiceTest {
         // JwtService, not mocked, so the success test below can decode an
         // actual token instead of trusting a canned mock return value.
         jwtService = new JwtService("test-only-jwt-signing-secret-at-least-32-bytes-long-xyz", ACCESS_TOKEN_EXPIRATION_MINUTES);
-        authService = new AuthService(userRepository, passwordEncoder, jwtService);
+        authService = new AuthService(userRepository, passwordEncoder, jwtService, refreshTokenService);
     }
 
     private User existingUser() {
@@ -80,6 +92,7 @@ class AuthServiceTest {
         // the assertions below only check the username claim and expiry, not
         // the subject claim, so a missing id doesn't affect what's verified.
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(user));
+        when(refreshTokenService.issueForNewLogin(anyString())).thenReturn("a-fresh-refresh-token");
 
         LoginRequest request = new LoginRequest();
         request.setUsername("alice");
@@ -88,6 +101,7 @@ class AuthServiceTest {
         LoginResponse response = authService.login(request);
 
         assertThat(response.getAccessToken()).isNotBlank();
+        assertThat(response.getRefreshToken()).isEqualTo("a-fresh-refresh-token");
         assertThat(response.getTokenType()).isEqualTo("Bearer");
         assertThat(response.getExpiresInSeconds()).isEqualTo(ACCESS_TOKEN_EXPIRATION_MINUTES * 60);
 
@@ -154,5 +168,37 @@ class AuthServiceTest {
         assertThrows(InvalidCredentialsException.class, () -> authService.login(request));
 
         verify(passwordEncoder, times(1)).matches(anyString(), anyString());
+    }
+
+    @Test
+    void refresh_withValidToken_returnsNewAccessTokenAndTheRotatedRefreshToken() {
+        User user = existingUser();
+        when(refreshTokenService.rotate("old-refresh-token"))
+                .thenReturn(new RefreshTokenService.RotatedTokens("7", "new-refresh-token"));
+        when(userRepository.findById(7L)).thenReturn(Optional.of(user));
+
+        RefreshResponse response = authService.refresh("old-refresh-token");
+
+        assertThat(response.getAccessToken()).isNotBlank();
+        // The exact token RefreshTokenService.rotate(...) handed back — this
+        // is deliberately just plumbed through, not regenerated here.
+        assertThat(response.getRefreshToken()).isEqualTo("new-refresh-token");
+        assertThat(response.getTokenType()).isEqualTo("Bearer");
+        assertThat(response.getExpiresInSeconds()).isEqualTo(ACCESS_TOKEN_EXPIRATION_MINUTES * 60);
+
+        Claims claims = jwtService.parseToken(response.getAccessToken());
+        assertThat(claims.get("username", String.class)).isEqualTo("alice");
+    }
+
+    @Test
+    void refresh_withInvalidToken_propagatesInvalidRefreshTokenException() {
+        // RefreshTokenService.rotate(...) is where "not found," "expired,"
+        // and "reuse detected" all collapse into ONE exception (see
+        // RefreshTokenServiceTest for those cases in detail) — from
+        // AuthService's side, all it needs to do is let that exception
+        // propagate untouched, which this test locks in.
+        when(refreshTokenService.rotate("stale-token")).thenThrow(new InvalidRefreshTokenException());
+
+        assertThrows(InvalidRefreshTokenException.class, () -> authService.refresh("stale-token"));
     }
 }
