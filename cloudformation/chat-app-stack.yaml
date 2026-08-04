@@ -1,0 +1,1058 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  chat-app AWS deployment (build-order step 12, CLAUDE.md 3.8): VPC (public
+  subnets only, no NAT), a single data-layer EC2 instance running
+  MySQL/Redis/Kafka, a single EC2 instance for user-service, an Auto Scaling
+  Group (min 1 / max 4) for chat-service, and an ALB in front of both.
+  Template only - not deployed by this commit. See the comment block above
+  the Resources section for a primer on the CloudFormation concepts used
+  throughout, and see each resource's own comments for the specific
+  reasoning behind it.
+
+# =============================================================================
+# CLOUDFORMATION 101 (for anyone new to CFN reading this file)
+# =============================================================================
+# A CloudFormation template is a declarative description of AWS resources -
+# you describe the END STATE you want, and CloudFormation figures out what to
+# create/update/delete to get there. This template has three top-level
+# sections, in the order CloudFormation expects them:
+#
+#   Parameters - inputs you supply at deploy time (aws cloudformation
+#     create-stack --parameters ...), so the same template is reusable across
+#     accounts/environments without editing the file itself. Every value that
+#     could reasonably differ per-deployment (an IP, a secret, an instance
+#     size) lives here rather than being hardcoded into a Resource below.
+#
+#   Resources - the actual AWS things to create (a VPC, an EC2 instance, a
+#     security group, ...). This is almost the entire file. Every resource
+#     has a "logical ID" (e.g. "Vpc", "AlbSecurityGroup") - a name that only
+#     exists WITHIN this template, used to reference that resource from
+#     elsewhere in the same template. CloudFormation assigns the real
+#     AWS-side resource ID/ARN itself at deploy time.
+#
+#   Outputs - values worth printing after a successful deploy so you don't
+#     have to go hunting for them in the console (e.g. the ALB's DNS name,
+#     needed to point Porkbun's CNAME at it per CLAUDE.md 3.8).
+#
+# Throughout, you'll see a handful of "intrinsic functions" - built-in
+# template operations, recognizable by their leading "!":
+#
+#   !Ref SomeLogicalId
+#     Resolves to that resource's "primary identifier" (varies by resource
+#     type - for a Subnet it's the subnet ID, for a SecurityGroup it's the
+#     group ID, etc.), OR, if SomeLogicalId is a Parameter instead of a
+#     Resource, resolves to whatever value was supplied for that parameter.
+#
+#   !GetAtt SomeLogicalId.SomeAttribute
+#     Like !Ref, but for the OTHER values a resource exposes beyond its
+#     primary identifier - e.g. !GetAtt UserServiceEcrRepository.RepositoryUri
+#     gets the repo's pull URL, not just its name.
+#
+#   !Sub "some string with ${SomeLogicalId} inside it"
+#     Template substitution - replaces every ${...} with the equivalent of
+#     !Ref (or !GetAtt, using ${LogicalId.Attribute}) on that name, inside an
+#     arbitrary string. Used heavily below to build the EC2 user-data
+#     (startup) scripts, since those are just plain bash text with AWS
+#     values spliced in. IMPORTANT gotcha used later: if a user-data script
+#     needs a LITERAL bash "${...}" for its own purposes (this template
+#     avoids that entirely, but flagging it since it's a common trap) you'd
+#     have to escape it as "${!...}" - otherwise CloudFormation tries to
+#     resolve it as one of ITS names and fails.
+#
+#   !Base64 someString
+#     Base64-encodes a string - EC2's UserData property always expects
+#     base64 (the EC2 console does this for you invisibly when you paste a
+#     script in; CloudFormation does not, so it's done explicitly below).
+#
+#   !GetAZs '' / !Select [N, list]
+#     !GetAZs '' returns the list of Availability Zones in whichever region
+#     the stack is being deployed to (the empty string means "the region
+#     this stack is in", vs. naming a specific region explicitly).
+#     !Select [0, ...] / !Select [1, ...] then pick the 1st/2nd AZ off that
+#     list - this is how the two public subnets below land in two DIFFERENT
+#     AZs (an ALB requires subnets in at least 2 AZs) without hardcoding AZ
+#     names, which would make the template break in other regions.
+#
+# One deliberate simplification, called out once here rather than repeated
+# at every occurrence below: MysqlRootPassword and JwtSecret are marked
+# NoEcho (hidden from the CloudFormation console/CLI output), but NoEcho
+# does NOT encrypt or hide them from the EC2 side - they end up in plain
+# text inside the EC2 instances' UserData (readable via
+# DescribeInstanceAttribute by anyone with EC2 read access, or from inside
+# the instance itself via the instance metadata service). A more
+# production-grade version of this template would fetch these from AWS
+# Secrets Manager or SSM Parameter Store (SecureString) at boot instead of
+# baking them into UserData - not done here to keep this template's resource
+# count and IAM surface down for a first pass, consistent with section 1's
+# explicit "learning project, not pure production-necessity" framing. Worth
+# revisiting before this ever handled real user data.
+
+Parameters:
+
+  SshAllowedCidr:
+    Type: String
+    Description: >-
+      CIDR block allowed to SSH into the app and data instances, e.g.
+      "203.0.113.5/32" for a single IP (find yours with "curl -4
+      ifconfig.me" and append /32). Deliberately has NO default - this must
+      be supplied explicitly on every deploy so a wide-open 0.0.0.0/0 can
+      never be silently used for SSH.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Must be a CIDR block, e.g. 203.0.113.5/32
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: >-
+      Name of an EXISTING EC2 key pair in this region (create one in the
+      EC2 console -> Key Pairs first, if you don't have one) - used for SSH
+      access to all three instances. This parameter type makes
+      CloudFormation itself validate that the key pair actually exists
+      before attempting to deploy, rather than failing later at instance
+      launch.
+
+  AcmCertificateArn:
+    Type: String
+    Default: arn:aws:acm:us-east-1:786566430552:certificate/cddcb649-0fb0-4d07-8b25-e6927cadb7c4
+    Description: >-
+      ACM certificate ARN for api.sarthak-chat-app.beer (CLAUDE.md 3.8).
+      Defaults to the certificate already issued for this project. Must be
+      a us-east-1 certificate for the ALB listener below to use it
+      regardless of which region the rest of this stack deploys into.
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the whole VPC.
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: >-
+      CIDR for the first public subnet (AZ 1). DataInstancePrivateIp below
+      must fall inside this range - the data instance is placed here.
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: >-
+      CIDR for the second public subnet (AZ 2). An ALB requires subnets in
+      at least two AZs, which is the only reason a second public subnet
+      exists in a "no NAT, minimize cost" design like this one (CLAUDE.md
+      3.8) - it costs nothing extra by itself, unlike a second NAT Gateway
+      would.
+
+  DataInstancePrivateIp:
+    Type: String
+    Default: 10.0.1.10
+    Description: >-
+      Fixed private IP assigned to the data instance (must fall within
+      PublicSubnet1Cidr). Parameterized rather than hardcoded, and also
+      deliberately FIXED rather than left to AWS's auto-assignment: both
+      the data instance itself (which advertises this exact address as its
+      Kafka listener - see DataInstance's UserData) and user-service /
+      chat-service (which are told to connect to MySQL/Redis/Kafka at this
+      exact address) need to agree on the same value, and a fixed parameter
+      shared by both sides is what lets this whole stack deploy in ONE pass
+      instead of a two-phase "deploy data instance, read back its assigned
+      IP, redeploy the app instances with that IP" dance.
+
+  DataInstanceType:
+    Type: String
+    Default: t3.small
+    Description: >-
+      Runs MySQL + Redis + Kafka together - a bit more headroom than
+      t3.micro is reasonable here even for a demo, since this single
+      instance is the SPOF for the whole data layer (CLAUDE.md 3.8/3.4).
+
+  UserServiceInstanceType:
+    Type: String
+    Default: t3.micro
+
+  ChatServiceInstanceType:
+    Type: String
+    Default: t3.micro
+    Description: >-
+      Step 11's load test (CLAUDE.md 3.6) ran against a 512MB/1vCPU Docker
+      Desktop container, not a real t3.micro (1GB RAM) - rerun
+      load-test/ws-ramp-test.js against a real deployed instance once this
+      stack is up for actual sizing numbers, per that section's own
+      caveat.
+
+  ChatServiceMinSize:
+    Type: Number
+    Default: 1
+    Description: CLAUDE.md 3.8 - chat-service ASG minimum.
+
+  ChatServiceMaxSize:
+    Type: Number
+    Default: 4
+    Description: CLAUDE.md 3.8 - chat-service ASG maximum.
+
+  ChatServiceDesiredCapacity:
+    Type: Number
+    Default: 1
+
+  MysqlRootPassword:
+    Type: String
+    NoEcho: true
+    Description: >-
+      MySQL root password shared by both services (see the NoEcho caveat
+      in the comment block above). No default, unlike docker-compose.yml's
+      local-dev "root" - that default is explicitly scoped to local dev
+      only; real cloud infrastructure shouldn't silently inherit it.
+
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    Description: >-
+      Shared JWT signing secret (CLAUDE.md 3.3) - user-service issues
+      tokens, chat-service verifies them; both need the byte-identical
+      value. Deliberately no default, for the exact reason CLAUDE.md 3.3
+      already gives for jwt.secret's own externalization: a real
+      deployment must be forced to set this explicitly rather than
+      silently inheriting docker-compose.yml's dev-only placeholder value
+      sitting in git history. Generate one with, e.g.: openssl rand -base64 48
+
+  UserServiceImageTag:
+    Type: String
+    Default: latest
+    Description: Image tag to pull from the user-service ECR repository below.
+
+  ChatServiceImageTag:
+    Type: String
+    Default: latest
+    Description: Image tag to pull from the chat-service ECR repository below.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: >-
+      NOT a literal AMI ID - a pointer to a public, AWS-maintained SSM
+      parameter that always resolves to whatever the current Amazon Linux
+      2023 AMI is, for whichever region this stack deploys into. This
+      avoids hardcoding an AMI ID, which is both region-specific and goes
+      stale as AWS publishes new AMIs - using this parameter TYPE (not a
+      plain String) makes CloudFormation resolve the SSM parameter's VALUE
+      (the actual AMI ID) at deploy time and hand that to every ImageId
+      property below, automatically.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # NETWORKING: VPC, public subnets in 2 AZs, Internet Gateway, route tables.
+  # No NAT Gateway anywhere - CLAUDE.md 3.8's explicit cost tradeoff (a NAT
+  # Gateway bills a fixed ~$32+/month regardless of use). Every instance in
+  # this stack lives in a PUBLIC subnet with a public IP, and Security Groups
+  # (further below) are what actually restrict access, not network topology.
+  # ---------------------------------------------------------------------------
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: chat-app-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: chat-app-igw
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      # Every instance launched into this subnet gets a public IP
+      # automatically - this is what "public subnet" actually means in
+      # practice here, given there's no NAT to route outbound traffic
+      # through instead.
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: chat-app-public-subnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: chat-app-public-subnet-2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: chat-app-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    # DependsOn is needed here: a route to an Internet Gateway can't be
+    # created until the IGW is actually attached to the VPC. Without this,
+    # CloudFormation might try to create the Route and the
+    # VPCGatewayAttachment in parallel (it parallelizes independent-looking
+    # resources by default) and the Route creation would fail.
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ---------------------------------------------------------------------------
+  # SECURITY GROUPS - the actual access-control layer given there's no
+  # private-subnet network isolation (CLAUDE.md 3.8). Three groups, matching
+  # the three "tiers" in this architecture: the ALB (open to the internet on
+  # 443 only), the app instances (reachable only from the ALB, plus SSH from
+  # one operator IP), and the data instance (reachable only from the app
+  # instances' own security group, plus SSH from that same operator IP - not
+  # explicitly requested, added here since being unable to SSH into the box
+  # running MySQL/Kafka to debug it would make this data layer un-operable).
+  # ---------------------------------------------------------------------------
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Chat-app ALB - inbound HTTPS from the internet only.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: chat-app-alb-sg
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Chat-app user-service/chat-service instances - app port from the
+        ALB only, SSH from one operator IP only.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        # SourceSecurityGroupId (not a CIDR) - this rule means "traffic
+        # whose source is something wearing AlbSecurityGroup", not "traffic
+        # from any particular IP range". This is what actually enforces
+        # "only the ALB may reach the app instances directly" - a client
+        # that guesses an app instance's public IP and connects straight to
+        # port 8080 is blocked, regardless of what CIDR they're coming
+        # from, because their traffic doesn't carry the ALB's security
+        # group membership.
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshAllowedCidr
+      Tags:
+        - Key: Name
+          Value: chat-app-app-sg
+
+  DataSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Chat-app data instance (MySQL/Redis/Kafka) - reachable only from
+        app instances, plus SSH from one operator IP.
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 9092
+          ToPort: 9092
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshAllowedCidr
+      Tags:
+        - Key: Name
+          Value: chat-app-data-sg
+
+  # ---------------------------------------------------------------------------
+  # ECR - one repository per service, matching the two Dockerfiles already in
+  # this repo (user-service/Dockerfile, chat-service/Dockerfile). ScanOnPush
+  # and a basic untagged-image lifecycle rule are cheap, standard hygiene
+  # additions, not something explicitly asked for but essentially free to
+  # include.
+  # ---------------------------------------------------------------------------
+
+  UserServiceEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: chat-app/user-service
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  ChatServiceEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: chat-app/chat-service
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ---------------------------------------------------------------------------
+  # IAM - one role/instance-profile, attached to the user-service and
+  # chat-service instances only (NOT the data instance, which never calls any
+  # AWS API and so gets no IAM role at all - least privilege means "no
+  # permissions" is the right answer when none are needed, not "attach the
+  # same role everywhere for consistency"). This role's ONLY job is letting
+  # those instances pull their own images from ECR - the AWS-MANAGED
+  # AmazonEC2ContainerRegistryReadOnly policy is used deliberately instead of
+  # a hand-rolled one: it's the policy AWS itself publishes and maintains for
+  # exactly this use case (read/pull, no push/delete), so it's both
+  # least-privilege-appropriate and won't need hand-maintenance as ECR's API
+  # evolves.
+  # ---------------------------------------------------------------------------
+
+  Ec2EcrPullRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: chat-app-ec2-ecr-pull-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref Ec2EcrPullRole
+
+  # ---------------------------------------------------------------------------
+  # DATA INSTANCE - single EC2 instance (not an ASG - CLAUDE.md 3.8 accepts
+  # this as a SPOF, consistent with the Kafka SPOF already accepted in 3.4),
+  # running MySQL + Redis + Kafka via the same docker-compose pattern as
+  # local dev. A plain AWS::EC2::Instance (not a Launch Template) - see the
+  # comment on UserServiceInstance below for why a Launch Template DOES make
+  # sense for the app instances but arguably matters less here; this
+  # instance's config is simple enough, and unlike the app instances there's
+  # no ECR image tag to bump on redeploy, so there's less benefit to
+  # versioning its launch config specifically.
+  # ---------------------------------------------------------------------------
+
+  DataInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref DataInstanceType
+      KeyName: !Ref KeyPairName
+      # A fixed private IP requires the more verbose NetworkInterfaces block
+      # (rather than the simpler top-level SubnetId/SecurityGroupIds
+      # properties) - AssociatePublicIpAddress is only settable inside a
+      # NetworkInterfaces entry, not as a top-level Instance property.
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet1
+          PrivateIpAddress: !Ref DataInstancePrivateIp
+          AssociatePublicIpAddress: true
+          GroupSet:
+            - !Ref DataSecurityGroup
+      UserData:
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash
+            set -euxo pipefail
+
+            # --- Docker + standalone docker-compose on Amazon Linux 2023 ---
+            # AL2023 ships Docker directly via dnf (no extra repo setup
+            # needed, unlike older Amazon Linux). docker-compose itself
+            # isn't in AL2023's default repos, so it's fetched as a single
+            # self-contained binary from its GitHub release - the same
+            # "grab one binary" approach load-test/README's k6 install used
+            # locally, just via curl here since this instance has no
+            # Homebrew.
+            dnf install -y docker
+            systemctl enable --now docker
+            usermod -aG docker ec2-user
+
+            curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+              -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+
+            mkdir -p /opt/chat-app-data/mysql-init
+            cd /opt/chat-app-data
+
+            # Byte-identical to this repo's own mysql-init/01-init-databases.sql
+            # - creates the two empty databases; Hibernate's ddl-auto:update
+            # (see each service's application.yml) creates the actual
+            # tables on first boot, same as local dev.
+            cat > mysql-init/01-init-databases.sql <<'SQL'
+            CREATE DATABASE IF NOT EXISTS userdb;
+            CREATE DATABASE IF NOT EXISTS messagedb;
+            SQL
+
+            # docker-compose.yml: the data layer only (mysql + redis +
+            # kafka), reusing the exact same image versions and KRaft-mode
+            # settings as this repo's own docker-compose.yml (see that
+            # file's comments for what each Kafka setting does - unchanged
+            # here). The ONE thing that has to differ: Kafka's advertised
+            # listener. Locally, docker-compose.yml advertises TWO
+            # listeners (one for other containers on the same Compose
+            # network, one for anything outside Docker) because
+            # chat-service might be a container on that network OR a
+            # natively-run process on the same machine. Here, user-service
+            # and chat-service are NEVER on this instance's Docker network -
+            # they're always a different EC2 instance entirely, reached
+            # over the VPC - so there's only one real case to advertise:
+            # this instance's own private IP.
+            #
+            # Quoted heredoc delimiters ('SQL', 'COMPOSE') throughout this
+            # script are deliberate: CloudFormation's Fn::Sub has ALREADY
+            # replaced every dollar-brace placeholder below with a literal
+            # value by the time this script reaches the instance, so
+            # there's nothing left for bash itself to expand - quoting
+            # just guarantees bash doesn't try to interpret anything
+            # unexpected in what's left. (NOTE for anyone editing this
+            # script: even a COMMENT inside this Fn::Sub block that
+            # literally spells out a dollar-brace pattern would make
+            # CloudFormation try to resolve it as a real reference and
+            # fail template validation - this whole indented block is one
+            # literal string as far as YAML/Sub are concerned, so "#" here
+            # starts a bash comment, not a YAML one, and offers no
+            # protection from Sub's own parsing.)
+            cat > docker-compose.yml <<'COMPOSE'
+            services:
+              mysql:
+                image: mysql:8.0
+                container_name: chat-app-mysql
+                restart: unless-stopped
+                environment:
+                  MYSQL_ROOT_PASSWORD: '${MysqlRootPassword}'
+                ports:
+                  - "3306:3306"
+                volumes:
+                  - mysql-data:/var/lib/mysql
+                  - ./mysql-init:/docker-entrypoint-initdb.d
+                healthcheck:
+                  test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MysqlRootPassword}"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+
+              redis:
+                image: redis:7-alpine
+                container_name: chat-app-redis
+                restart: unless-stopped
+                ports:
+                  - "6379:6379"
+                healthcheck:
+                  test: ["CMD", "redis-cli", "ping"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+
+              kafka:
+                image: apache/kafka:4.3.1
+                hostname: kafka
+                container_name: chat-app-kafka
+                restart: unless-stopped
+                ports:
+                  - "9092:9092"
+                environment:
+                  KAFKA_NODE_ID: 1
+                  KAFKA_PROCESS_ROLES: 'broker,controller'
+                  KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+                  # Single external listener here (PLAINTEXT) instead of
+                  # local dev's PLAINTEXT/PLAINTEXT_HOST split - see the
+                  # comment above this whole docker-compose.yml block for
+                  # why only one case applies once this runs on EC2.
+                  KAFKA_LISTENERS: 'CONTROLLER://:29093,PLAINTEXT://:9092'
+                  KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://${DataInstancePrivateIp}:9092'
+                  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
+                  KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+                  KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+                  CLUSTER_ID: 'ciWo7IWazngRchmPES6q5A=='
+                  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+                  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+                  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+                  KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+                  KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+                  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+                healthcheck:
+                  test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+                  interval: 10s
+                  timeout: 10s
+                  retries: 10
+                  start_period: 30s
+
+            volumes:
+              mysql-data:
+            COMPOSE
+
+            docker-compose up -d
+      Tags:
+        - Key: Name
+          Value: chat-app-data
+
+  # ---------------------------------------------------------------------------
+  # USER-SERVICE - a Launch Template feeding a single, standalone EC2
+  # instance (not an ASG, per CLAUDE.md 3.8: user-service is stateless HTTP
+  # with a much flatter load profile than chat-service, so one instance is
+  # enough to demonstrate the deployment without a second scaling story).
+  #
+  # Is a Launch Template even worth it for something that isn't auto-scaled?
+  # A bare AWS::EC2::Instance resource could hold ImageId/InstanceType/
+  # UserData directly with no separate Launch Template at all, and updating
+  # those properties directly on the Instance resource ALSO triggers
+  # CloudFormation to replace the instance on a stack update - so the
+  # Launch Template's usual "let multiple things reference one versioned
+  # config" benefit isn't strictly needed when only one instance ever uses
+  # it. The reason to use one anyway: CLAUDE.md 3.8's own deployment
+  # mechanism ("Launch Template versioning + ASG Instance Refresh") reads
+  # naturally as ONE consistent deploy pattern for both services built from
+  # the same CI/CD pipeline - chat-service gets the Instance Refresh half
+  # of that for free from its ASG, and giving user-service a Launch
+  # Template too (even without the ASG half) keeps both services'
+  # deployment shape symmetric and keeps a version history of every
+  # UserData/image-tag change, which a bare Instance resource wouldn't
+  # retain on its own. That symmetry/history benefit is judged worth one
+  # extra resource here.
+  # ---------------------------------------------------------------------------
+
+  UserServiceLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: chat-app-user-service
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref UserServiceInstanceType
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt Ec2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        UserData:
+          Fn::Base64:
+            Fn::Sub: |
+              #!/bin/bash
+              set -euxo pipefail
+
+              # Docker only - no docker-compose needed, this instance runs
+              # a single container via a plain `docker run`. AWS CLI v2
+              # ships preinstalled on Amazon Linux 2023 AMIs, so no
+              # separate install step is needed for the ECR login below.
+              dnf install -y docker
+              systemctl enable --now docker
+              usermod -aG docker ec2-user
+
+              # Authenticate to ECR using THIS INSTANCE'S IAM ROLE
+              # (Ec2EcrPullRole/Ec2InstanceProfile above) - no access keys
+              # stored on the instance anywhere. `aws ecr
+              # get-login-password` transparently uses whatever
+              # credentials the instance metadata service hands it, which
+              # is exactly the point of attaching an instance profile.
+              aws ecr get-login-password --region ${AWS::Region} \
+                | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+              docker pull ${UserServiceEcrRepository.RepositoryUri}:${UserServiceImageTag}
+
+              # JAVA_TOOL_OPTIONS, not a Dockerfile change: this is picked
+              # up automatically by the `java` launcher (the image's own
+              # ENTRYPOINT is `java -jar app.jar`, unmodified) purely via
+              # this environment variable - no image rebuild needed.
+              # -XX:MaxRAMPercentage=75.0 directly applies step 11's
+              # finding (CLAUDE.md 3.6): Java's container-aware default
+              # caps max heap at 25% of available memory, and THAT (not
+              # total container/instance memory, which had comfortable
+              # headroom the whole time) is what actually ran out and
+              # threw chat-service into a GC-thrashing death spiral under
+              # load. Raising the percentage well past the 25% default
+              # leaves real headroom for the OS/Docker daemon while giving
+              # the JVM most of the instance's memory to actually use.
+              docker run -d \
+                --name user-service \
+                --restart unless-stopped \
+                -p 8080:8080 \
+                -e MYSQL_HOST='${DataInstancePrivateIp}' \
+                -e MYSQL_PORT=3306 \
+                -e MYSQL_USER=root \
+                -e MYSQL_PASSWORD='${MysqlRootPassword}' \
+                -e REDIS_HOST='${DataInstancePrivateIp}' \
+                -e REDIS_PORT=6379 \
+                -e JWT_SECRET='${JwtSecret}' \
+                -e JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75.0' \
+                ${UserServiceEcrRepository.RepositoryUri}:${UserServiceImageTag}
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: chat-app-user-service
+
+  UserServiceInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref UserServiceLaunchTemplate
+        # $Latest, not a pinned version number: whenever a future stack
+        # update pushes a new Launch Template version (e.g. a new
+        # UserServiceImageTag after a CI/CD deploy), this instance property
+        # changes too, which is exactly what makes CloudFormation replace
+        # this instance automatically on that update - the manual
+        # redeploy step for a single non-ASG instance.
+        Version: !GetAtt UserServiceLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: chat-app-user-service
+
+  # ---------------------------------------------------------------------------
+  # CHAT-SERVICE - Launch Template + Auto Scaling Group (min/max/desired from
+  # parameters, CLAUDE.md 3.8's min 1 / max 4 by default), scaled by two
+  # CloudWatch Alarms + two Simple Scaling Policies rather than the newer
+  # TargetTrackingScaling shortcut - deliberately more verbose, because this
+  # project's whole reason for choosing plain EC2 over ECS/Fargate (CLAUDE.md
+  # 3.8) is hands-on visibility into the underlying mechanics, and
+  # TargetTrackingScaling would hide the CloudWatch Alarm -> ScalingPolicy
+  # wiring the same way an orchestrator would hide ASG/ALB mechanics.
+  #
+  # CPU utilization as the scaling metric - a real, documented tradeoff, not
+  # an oversight: step 11's load test (CLAUDE.md 3.6) found chat-service's
+  # actual failure mode was JVM HEAP exhaustion under connection-driven
+  # object churn, with CPU staying near-idle except for brief spikes during
+  # each connection-accept burst - meaning CPU is an INDIRECT, somewhat
+  # imprecise proxy for the real constraint here. The more accurate signals
+  # would be JVM heap usage % or live WebSocket connection count per
+  # instance, but neither is a stock CloudWatch EC2 metric: heap usage needs
+  # the CloudWatch agent wired up with JMX/Micrometer, and connection count
+  # needs the app to publish its own custom CloudWatch metric - neither is
+  # built yet. CPU is used here as the practical, zero-extra-instrumentation
+  # metric to get a WORKING scaling policy into this first version of the
+  # template, with this comment as the explicit flag that a
+  # connection-count-based policy (or at minimum a memory-based one) is the
+  # more accurate follow-up once that instrumentation exists.
+  # ---------------------------------------------------------------------------
+
+  ChatServiceLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: chat-app-chat-service
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref ChatServiceInstanceType
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt Ec2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        UserData:
+          Fn::Base64:
+            Fn::Sub: |
+              #!/bin/bash
+              set -euxo pipefail
+
+              dnf install -y docker
+              systemctl enable --now docker
+              usermod -aG docker ec2-user
+
+              aws ecr get-login-password --region ${AWS::Region} \
+                | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+              docker pull ${ChatServiceEcrRepository.RepositoryUri}:${ChatServiceImageTag}
+
+              # Same -XX:MaxRAMPercentage=75.0 reasoning as
+              # UserServiceLaunchTemplate above - this is the service step
+              # 11 actually load-tested, so this line is the direct,
+              # concrete output of that finding. No REDIS_HOST here:
+              # chat-service has no Redis dependency anywhere in its code -
+              # only user-service uses Redis, for the refresh-token store
+              # (CLAUDE.md 3.3).
+              docker run -d \
+                --name chat-service \
+                --restart unless-stopped \
+                -p 8080:8080 \
+                -e MYSQL_HOST='${DataInstancePrivateIp}' \
+                -e MYSQL_PORT=3306 \
+                -e MYSQL_USER=root \
+                -e MYSQL_PASSWORD='${MysqlRootPassword}' \
+                -e KAFKA_BOOTSTRAP_SERVERS='${DataInstancePrivateIp}:9092' \
+                -e JWT_SECRET='${JwtSecret}' \
+                -e JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75.0' \
+                ${ChatServiceEcrRepository.RepositoryUri}:${ChatServiceImageTag}
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: chat-app-chat-service
+
+  ChatServiceAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: chat-app-chat-service
+      MinSize: !Ref ChatServiceMinSize
+      MaxSize: !Ref ChatServiceMaxSize
+      DesiredCapacity: !Ref ChatServiceDesiredCapacity
+      # Both public subnets (2 AZs) - actual multi-AZ spread for
+      # chat-service's own instances, even though the data layer behind
+      # them remains a single-AZ SPOF (CLAUDE.md 3.8/3.4's accepted
+      # tradeoff) - those are two independent decisions.
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ChatServiceLaunchTemplate
+        Version: !GetAtt ChatServiceLaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref ChatServiceTargetGroup
+      # ELB, not EC2: an instance can pass EC2's own basic status checks
+      # (network/OS-level) while chat-service's actual application is still
+      # starting up, mid-crash, or otherwise unhealthy - HealthCheckType
+      # ELB makes the ASG trust the ALB target group's /actuator/health
+      # check instead, which is what actually reflects whether the app is
+      # serving traffic correctly.
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      Tags:
+        - Key: Name
+          Value: chat-app-chat-service
+          PropagateAtLaunch: true
+
+  ChatServiceScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ChatServiceAutoScalingGroup
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: 1
+      Cooldown: '300'
+
+  ChatServiceScaleInPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ChatServiceAutoScalingGroup
+      PolicyType: SimpleScaling
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: -1
+      Cooldown: '300'
+
+  ChatServiceHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: >-
+        Scale chat-service OUT when average CPU across the ASG exceeds 70%
+        for two consecutive 5-minute periods. See the comment above
+        ChatServiceLaunchTemplate for why CPU is used despite step 11
+        finding it's an imprecise proxy for this service's real capacity
+        constraint.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ChatServiceAutoScalingGroup
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref ChatServiceScaleOutPolicy
+
+  ChatServiceLowCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: >-
+        Scale chat-service IN when average CPU across the ASG drops below
+        30% for two consecutive 5-minute periods.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref ChatServiceAutoScalingGroup
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 30
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref ChatServiceScaleInPolicy
+
+  # ---------------------------------------------------------------------------
+  # ALB - one public HTTPS entry point for the whole backend (CLAUDE.md 3.8),
+  # routing to user-service or chat-service by path. idle_timeout is
+  # deliberately raised well past ALB's 60s default: chat-service's
+  # WebSocket connections (CLAUDE.md 3.1) are meant to stay open and mostly
+  # IDLE between messages (that's the whole point of a persistent
+  # connection) - at the default timeout, the ALB itself would silently
+  # force-close any WebSocket that goes 60s without traffic, breaking the
+  # exact long-lived-connection behavior this app depends on. This wasn't
+  # spelled out in the request but is a correctness requirement for what
+  # WAS asked (an ALB routing to chat-service's WebSocket endpoint), not a
+  # scope addition.
+  # ---------------------------------------------------------------------------
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: chat-app-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '3600'
+
+  UserServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: chat-app-user-svc-tg
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref Vpc
+      TargetType: instance
+      # A static Targets list is only appropriate here because
+      # user-service is ONE fixed, manually-managed instance (CLAUDE.md
+      # 3.8) - contrast with ChatServiceTargetGroup below, which has no
+      # Targets list at all because the ASG registers/deregisters its own
+      # instances dynamically instead.
+      Targets:
+        - Id: !Ref UserServiceInstance
+          Port: 8080
+      HealthCheckPath: /actuator/health
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ChatServiceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: chat-app-chat-svc-tg
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref Vpc
+      TargetType: instance
+      HealthCheckPath: /actuator/health
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref AcmCertificateArn
+      # Default action: anything not explicitly routed by a rule below goes
+      # to user-service - this covers /register, /login, /refresh, /users,
+      # /actuator/* without needing an explicit rule listing every one of
+      # them individually.
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UserServiceTargetGroup
+
+  ChatServiceListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /ws/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ChatServiceTargetGroup
+
+Outputs:
+
+  AlbDnsName:
+    Description: >-
+      ALB's DNS name - point Porkbun's api.sarthak-chat-app.beer CNAME
+      record at this once the stack is deployed (CLAUDE.md 3.8).
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  UserServiceEcrRepositoryUri:
+    Description: Push user-service images here from the GitHub Actions workflow.
+    Value: !GetAtt UserServiceEcrRepository.RepositoryUri
+
+  ChatServiceEcrRepositoryUri:
+    Description: Push chat-service images here from the GitHub Actions workflow.
+    Value: !GetAtt ChatServiceEcrRepository.RepositoryUri
