@@ -217,6 +217,86 @@ rather than pure production-necessity (called out where relevant).
   which drastically lowers per-connection memory cost. This needs to be validated
   with real load testing (Artillery/k6/Gatling/Locust), not just napkin math,
   before deciding final instance sizing.
+- **Step 11 load test results — empirically validates (and partly corrects) the
+  capacity reasoning above.** Tool: **k6**, chosen over Artillery/Gatling/Locust
+  because it can script the EXACT connection lifecycle this test needs directly
+  (open a real WebSocket, send one raw-string frame as the CLAUDE.md 3.1 auth
+  handshake — no envelope — hold the connection open, observe the close code),
+  via its native `k6/ws` module, combined with a built-in stepped-ramp executor
+  (`ramping-vus`) — no YAML/processor-function workaround needed the way
+  Artillery's WebSocket engine would require. Test users were seeded through the
+  REAL `/register` + `/login` endpoints (not a DB bypass), so each simulated
+  connection carries a genuine chat-service-verifiable JWT. Script + companion
+  `docker stats` sampler are committed at `load-test/` (`seed-users.js`,
+  `ws-ramp-test.js`, `capture-docker-stats.sh`) as a reusable artifact — rerun
+  the same way against the real AWS deployment once step 12 lands, for actual
+  sizing numbers.
+
+  **SCOPE CAVEAT (per the task that requested this): these are Docker Desktop
+  numbers, on one Mac, NOT AWS-representative.** chat-service was run under an
+  explicit, arbitrary 512MB memory / 1 CPU ceiling (`docker-compose.yml`'s
+  `deploy.resources.limits` — added specifically so this test would have a
+  ceiling to hit at all; Docker Desktop's own VM has no fixed relationship to
+  any real EC2 instance type). The absolute connection count below is a
+  methodology/failure-pattern validation for THIS environment, not a number to
+  plan AWS capacity around — that exercise happens once this script is rerun
+  against a real deployed instance.
+
+  - **First pass (1000 concurrent connections, ramped 50 at a time): zero
+    failures.** All 1000 WebSocket connections authenticated successfully;
+    chat-service's actual memory usage grew from a ~246MB baseline (JVM +
+    Spring context + Kafka consumer, before any test traffic) to only ~337MB
+    (66% of the 512MB ceiling) at 1000 concurrent connections — roughly 90-100KB
+    of REAL (resident) memory per connection, not the ~1MB assumed above. CPU
+    only spiked (briefly, to under 90%) during each ramp-up burst, then idled
+    near 0% at every plateau. This run did not find a ceiling at all.
+  - **Second pass (ramped toward 3000, 100 at a time): ceiling found around
+    ~1300-1400 concurrent connections** (chat-service's own logs show 1328
+    successful auth handshakes, zero closes, zero rejections, in the window
+    immediately before the crisis below started) — but NOT via total container
+    memory filling up. At the moment of failure, total container memory (RSS)
+    was still only ~338MB of the 512MB ceiling (66%) — comfortable headroom by
+    that measure. What actually broke was the **JVM's heap specifically**:
+    Java's container-aware default ergonomics caps max heap at 25% of the
+    container's memory limit (confirmed via `-XX:+PrintFlagsFinal`:
+    `MaxHeapSize` = 128MB for this 512MB container, `MaxRAMPercentage` = 25,
+    default) — so only 128MB, not 512MB, was ever available as heap, and IT is
+    what filled up first, well before the broader container ceiling. The
+    result was repeated `java.lang.OutOfMemoryError: Java heap space` across
+    HTTP/WebSocket acceptor and worker threads, sustained CPU pegged at
+    ~100-105% (the classic GC-thrashing "death spiral" — the JVM endlessly
+    running GC trying to free heap it can't, at the cost of doing any other
+    work), and cascading failure of essentially every subsequent connection
+    attempt (k6: `ws_connect_success` = 1349, `ws_connect_failure` = 12746 —
+    the failure count is inflated well past the true ceiling by k6's
+    `ramping-vus` executor immediately retrying with a new connection attempt
+    every time a VU's fast-failing iteration completed, a test-harness
+    amplification effect worth naming, not a second independent finding).
+  - **It did not self-recover.** Minutes after the offending load stopped and
+    every test connection had disconnected, chat-service was still resetting
+    new connections and logging fresh `OutOfMemoryError`s — a full container
+    restart (`docker restart`) was required to bring it back to a healthy
+    state. A JVM that has genuinely exhausted its heap under this kind of
+    sustained load does not degrade gracefully back to normal on its own here.
+  - **What this corrects vs. the theoretical reasoning above**: the assumed
+    bottleneck — ~1MB of thread-stack memory per connection accumulating
+    toward the instance's total memory — was NOT what actually happened. Real
+    per-connection memory overhead measured far lower (~90-100KB), consistent
+    with Tomcat's NIO connector not pinning a dedicated blocking OS thread to
+    every idle WebSocket connection the naive thread-per-connection model
+    assumes. The ceiling that WAS hit is heap object churn (WebSocket session
+    state, Jackson JSON buffers, connection-registry entries, Tomcat's
+    internal per-connection structures) exhausting a heap that was already
+    artificially small — 25% of container memory by JVM default — not the
+    container's own memory ceiling. **Practical, immediately-actionable
+    implication for real sizing (step 12)**: an instance sized purely by total
+    RAM, without also explicitly raising `-Xmx`/`-XX:MaxRAMPercentage` past the
+    25% default, will hit its real ceiling far earlier than its advertised
+    memory would suggest. Configuring `-XX:+ExitOnOutOfMemoryError` (or an
+    orchestrator health check that detects a JVM wedged in this state) so a
+    real deployment restarts automatically instead of silently serving from a
+    permanently-degraded instance is also now a concrete, evidence-backed
+    recommendation rather than boilerplate advice.
 - **If/when multiple Chat service instances are needed**: a shared registry
   (userId → instance) plus a pub/sub mechanism becomes necessary, since a live
   WebSocket connection physically exists in only one instance's memory. This is

@@ -155,6 +155,25 @@ services:
     restart: unless-stopped
     ports:
       - "8082:8080"
+    # Resource ceiling for build-order step 11's load test (CLAUDE.md 3.6/11.x):
+    # without an explicit limit, chat-service can freely consume whatever Docker
+    # Desktop's VM happens to have available, which makes "compare usage against
+    # its Docker-imposed limit" meaningless — there'd be no limit to compare
+    # against. 512m/1 cpu is a deliberately small, arbitrary-but-fixed ceiling
+    # chosen to make a connection-count failure point observable without needing
+    # thousands of simulated connections; it is NOT modeling any specific real
+    # EC2 instance type. The JVM's container-aware ergonomics (on by default,
+    # JDK 10+) caps default max heap at 25% of this limit automatically — no
+    # explicit -Xmx needed for that. Thread stacks (the ~1MB-per-connection cost
+    # CLAUDE.md 3.6 reasons about) are NOT heap; they draw from the same 512m
+    # container ceiling but outside that 25% heap carve-out, via the JVM's
+    # default ~1MB -Xss on Linux — again no override needed, the platform
+    # default already matches the number the theoretical math used.
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
     environment:
       JWT_SECRET: *jwt-secret
       # Same dual-mode reasoning as user-service's MYSQL_* block: these are
