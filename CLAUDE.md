@@ -332,6 +332,91 @@ rather than pure production-necessity (called out where relevant).
   building anything into the Chat service that assumes in-memory-only state
   beyond what's already flagged as "needs the registry once multi-instance."
 
+### 3.8 AWS deployment architecture (build-order step 12)
+
+Full stack design for the real deployment step 11's load test is meant to be
+rerun against once this lands. Captures decisions reached across design
+discussion that weren't written down anywhere else yet.
+
+- **Region: `us-east-1`.** Cheapest baseline pricing across the standard AWS
+  region tiers, and also a hard, non-negotiable AWS constraint if CloudFront
+  ever gets a custom domain (it does — see below): an ACM certificate attached
+  to a CloudFront distribution MUST be requested in `us-east-1` regardless of
+  which region everything else lives in. Picking `us-east-1` for everything
+  else too avoids having two regions in play for no reason.
+- **VPC: public subnets only, no NAT Gateway.** An explicit cost tradeoff, not
+  an oversight — a NAT Gateway bills a fixed ~$32+/month whether or not
+  anything uses it, on top of per-GB data processing charges, and this
+  project's whole AWS posture is "minimize fixed recurring cost, timeboxed
+  learning exercise" (see 3.6's identical reasoning for skipping ALB
+  initially). Without private subnets, Security Groups become the actual
+  protection layer instead of network-level isolation — every instance is
+  reachable in principle, but Security Group rules scope what can actually
+  connect (e.g. the data-layer instance below only accepts MySQL/Redis/Kafka
+  ports from the backend instances' Security Group, not from the internet).
+- **Compute: plain EC2 + Launch Template + ASG — deliberately not
+  ECS/Fargate.** The stated purpose of this project (3.6, 6) is hands-on AWS
+  experience; ECS/Fargate would abstract away exactly the ASG/ALB/target-group
+  mechanics this project wants direct, hands-on visibility into. Same
+  reasoning as choosing Kafka over a managed queue in 3.4, and EC2+ALB+ASG
+  over Lightsail in section 6 — learning value over operational convenience,
+  called out explicitly per section 1's stated intent.
+- **Only chat-service is auto-scaled (min 1, max 4).** It's the one with
+  actual connection-capacity pressure worth demonstrating (see 3.6's step 11
+  results — a real, empirically-found ceiling exists per instance). user-service
+  is stateless HTTP with a much lighter, flatter load profile (3.2) — a single
+  fixed EC2 instance, no ASG, is enough to demonstrate the deployment without
+  needing a second scaling story. Both share ONE ALB via two separate target
+  groups (path/host-based routing) rather than provisioning a second ALB —
+  one public HTTPS entry point for the whole backend, and a second ALB would
+  just be a second ~$20+/month fixed cost (3.6) for no added capability here.
+- **Data layer: one single, non-scaled EC2 instance running MySQL + Redis +
+  Kafka**, via the same docker-compose pattern already used for local dev
+  (section 6) rather than three separate managed services (RDS/ElastiCache/MSK)
+  — keeps the deployment's shape close to what's already built and tested
+  locally. Accepted single point of failure — consistent with the Kafka SPOF
+  already accepted in 3.4 ("if the publish to Kafka fails outright... accepted
+  as lost"); this extends the same accepted-risk posture to the whole data
+  layer rather than introducing a new, inconsistent standard just for this
+  instance. HA/DR for this layer remains explicitly deferred, same as 3.6.
+- **Frontend: S3 + CloudFront, fully static, outside the VPC entirely.**
+  Angular's build output is static files — no compute needed to serve it, so
+  it isn't part of the EC2/ASG/VPC story above at all. CloudFront also is what
+  forces the custom-domain / ACM requirement below.
+- **Custom domain: `sarthak-chat-app.beer`** (registered via Porkbun), with
+  `api.sarthak-chat-app.beer` dedicated to the ALB/backend (the root domain
+  points at CloudFront/the frontend). An ACM certificate is already issued for
+  this subdomain:
+  `arn:aws:acm:us-east-1:786566430552:certificate/cddcb649-0fb0-4d07-8b25-e6927cadb7c4`.
+  Required, not cosmetic: CloudFront forces HTTPS on the frontend, and a
+  browser blocks mixed HTTPS→HTTP content — so once the frontend is served
+  over HTTPS via a real domain, the backend it calls must also present a real
+  TLS certificate for a real domain, not AWS's default `*.amazonaws.com` /
+  ALB DNS name (which browsers would flag, and which doesn't match this
+  project's own domain anyway).
+- **Images: ECR**, pulled by EC2 instances via an **IAM instance role** — no
+  stored credentials on the instances themselves, consistent with 3.3's
+  general stance against hardcoding secrets. Deployment on merge is **Launch
+  Template versioning + ASG Instance Refresh**, not ECS task definitions —
+  follows directly from the EC2/ASG (not ECS/Fargate) compute choice above;
+  there's no task-definition concept to use once ECS itself is out of the
+  picture.
+- **IaC: CloudFormation**, one template capturing the full stack. Chosen
+  specifically because this project's cost posture is "spin up to demo, tear
+  down when not in use," not "leave running" — a single template makes
+  `create-stack`/`delete-stack` the actual day-to-day workflow. This matters
+  because stopping EC2 instances alone does NOT stop the ALB's hourly billing
+  (3.6) — an ALB bills for existing, not for traffic — so a real teardown has
+  to delete the whole stack, not just stop instances, and CloudFormation is
+  what makes that a single reliable operation instead of manually chasing
+  every resource.
+- **IAM: a scoped-down (not admin) IAM user**, created manually by the
+  developer directly in the AWS console — a deliberate human checkpoint, not
+  something generated by Claude Code. Its access keys are what later get
+  pushed to GitHub Secrets for the CI/CD workflow (deploy-on-merge). Keeping
+  IAM user creation manual and out-of-band is intentional: credential
+  provisioning is exactly the kind of action that stays a human's call.
+
 ## 4. Finalized API / sequence flows
 
 - `POST /register` (username, password, firstName, lastName) → User service checks
