@@ -1,0 +1,197 @@
+name: Deploy user-service
+
+# Runs on every merge to main that touches user-service/ - path-filtered so a
+# chat-service-only or frontend-only commit never rebuilds/redeploys this
+# service. See deploy-chat-service.yml for the equivalent, deliberately
+# SEPARATE workflow for that service, and the note in this repo's PR history
+# on why two files rather than one parameterized workflow.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'user-service/**'
+      - '.github/workflows/deploy-user-service.yml'
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  # This stack's REAL, currently-deployed values (cloudformation/chat-app-stack.yaml
+  # Outputs + `aws autoscaling`/`aws ec2 describe-launch-templates` lookups) -
+  # not secrets, just stable identifiers for this one deployment. These only
+  # need updating if the CloudFormation stack is ever torn down and recreated
+  # (new resources = new IDs).
+  ECR_REPO: 786566430552.dkr.ecr.us-east-1.amazonaws.com/chat-app/user-service
+  LAUNCH_TEMPLATE_ID: lt-06f6d58af4f3def7a
+  TARGET_GROUP_ARN: arn:aws:elasticloadbalancing:us-east-1:786566430552:targetgroup/chat-app-user-svc-tg/19fde44f953860bf
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # CLAUDE.md 3.8: the manually-created, scoped-down chat-app-deploy
+          # IAM user's access keys. Same secret names as deploy-frontend.yml -
+          # one IAM user, one pair of secrets, reused by every deploy
+          # workflow in this repo rather than minting a new pair per
+          # workflow for no reason.
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+
+      - name: Compute short SHA
+        id: vars
+        run: echo "sha_short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Pushes TWO tags of the same build, and they serve different jobs:
+      #   :latest    - a floating pointer. This is what cloudformation/
+      #                chat-app-stack.yaml's UserServiceImageTag parameter
+      #                defaults to, so it's what a instance launched
+      #                straight from the CloudFormation-created Launch
+      #                Template (before this pipeline ever touches it)
+      #                pulls. Convenient for manual `docker pull ...:latest`
+      #                debugging too, but nothing in the automated deploy
+      #                below actually references it after this point.
+      #   :$sha_short - immutable. This is the tag the Launch Template
+      #                update below actually pins to, specifically so a
+      #                LATER unrelated event (someone else's merge pushing
+      #                a newer `latest`) can never change what THIS
+      #                instance is running out from under it. Rollback
+      #                means creating another new Launch Template version
+      #                that points at an OLDER already-pushed SHA tag - the
+      #                SHA tag is what makes that possible at all, since
+      #                `latest` alone gives you no way to address a
+      #                specific past build once it's been overwritten.
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./user-service
+          file: ./user-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REPO }}:latest
+            ${{ env.ECR_REPO }}:${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha,scope=user-service
+          cache-to: type=gha,mode=max,scope=user-service
+
+      # Creates a new Launch Template version by taking the CURRENT ($Latest)
+      # version's UserData and patching ONLY the image reference in it -
+      # not regenerating the script from scratch. This is deliberate, not
+      # just less code: the current UserData (rendered once by
+      # CloudFormation's Fn::Sub at stack-deploy time) already has
+      # MysqlRootPassword, JwtSecret, DataInstancePrivateIp, and the
+      # -XX:MaxRAMPercentage=75.0 JVM tuning (CLAUDE.md 3.6/step 11) baked
+      # into it correctly. Regenerating the whole script here would mean
+      # duplicating all of that (and re-storing the DB/JWT secrets as
+      # ANOTHER set of GitHub Secrets just for this workflow to rebuild
+      # something that already exists). Patching just the image reference
+      # inherits everything else unchanged, automatically, every time.
+      #
+      # The sed pattern matches the ECR repo URI followed by ANY tag
+      # (`[A-Za-z0-9_.-]+`), not literally ":latest" - on the very first
+      # deploy the current UserData says ":latest" (CloudFormation's
+      # default), but on every deploy after that it already says a
+      # PREVIOUS commit's short SHA, so a pattern that only matched
+      # ":latest" would silently stop working after the first run.
+      - name: Patch Launch Template UserData with new image tag
+        id: lt
+        run: |
+          set -euo pipefail
+          NEW_IMAGE="${{ env.ECR_REPO }}:${{ steps.vars.outputs.sha_short }}"
+
+          OLD_USER_DATA_B64=$(aws ec2 describe-launch-template-versions \
+            --launch-template-id "${{ env.LAUNCH_TEMPLATE_ID }}" \
+            --versions '$Latest' \
+            --query 'LaunchTemplateVersions[0].LaunchTemplateData.UserData' \
+            --output text)
+
+          NEW_USER_DATA_B64=$(echo "$OLD_USER_DATA_B64" | base64 -d | \
+            sed -E "s#${{ env.ECR_REPO }}:[A-Za-z0-9_.-]+#${NEW_IMAGE}#g" | \
+            base64 -w0)
+
+          NEW_VERSION=$(aws ec2 create-launch-template-version \
+            --launch-template-id "${{ env.LAUNCH_TEMPLATE_ID }}" \
+            --source-version '$Latest' \
+            --launch-template-data "{\"UserData\":\"${NEW_USER_DATA_B64}\"}" \
+            --query 'LaunchTemplateVersion.VersionNumber' \
+            --output text)
+
+          echo "New Launch Template version: $NEW_VERSION (image: $NEW_IMAGE)"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+          # So anything referencing the template WITHOUT an explicit
+          # version (e.g. a manual console launch) also picks up the new
+          # one - keeps $Default and $Latest in sync rather than letting
+          # $Default silently lag behind every deploy.
+          aws ec2 modify-launch-template \
+            --launch-template-id "${{ env.LAUNCH_TEMPLATE_ID }}" \
+            --default-version "$NEW_VERSION"
+
+      # user-service is a single AWS::EC2::Instance (CLAUDE.md 3.8:
+      # stateless, flat load profile, no ASG needed) - which means, unlike
+      # chat-service below, there is NO Auto Scaling Group watching over
+      # it and NOTHING automatically relaunches it if it's simply
+      # terminated. A bare EC2 instance has zero self-healing behavior;
+      # that's entirely an ASG feature. So "terminate and let it relaunch"
+      # is not actually a real mechanism here - this job has to explicitly
+      # run the replacement instance itself.
+      #
+      # Ordering matters: create the NEW instance and prove it's healthy in
+      # the target group BEFORE touching the OLD one. If anything below
+      # fails (bad image, app crash-loops, health check never passes), the
+      # OLD instance is still running and still registered - the failure
+      # leaves the site up with one extra broken instance for a human to
+      # clean up, not an outage. The alternative ordering (terminate first,
+      # then launch) would turn any deploy failure into a real outage.
+      - name: Replace the user-service instance
+        run: |
+          set -euo pipefail
+
+          OLD_INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=chat-app-user-service" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text)
+          echo "Current instance: $OLD_INSTANCE_ID"
+
+          # Reuse the same subnet the current instance is in, rather than
+          # hardcoding one - the Launch Template deliberately doesn't pin a
+          # subnet itself (so the SAME template can be reused by
+          # chat-service's multi-AZ ASG), so run-instances has to supply
+          # one explicitly.
+          SUBNET_ID=$(aws ec2 describe-instances \
+            --instance-ids "$OLD_INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].SubnetId' \
+            --output text)
+
+          NEW_INSTANCE_ID=$(aws ec2 run-instances \
+            --launch-template LaunchTemplateId=${{ env.LAUNCH_TEMPLATE_ID }},Version=${{ steps.lt.outputs.version }} \
+            --subnet-id "$SUBNET_ID" \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+          echo "New instance: $NEW_INSTANCE_ID"
+
+          aws ec2 wait instance-running --instance-ids "$NEW_INSTANCE_ID"
+
+          aws elbv2 register-targets \
+            --target-group-arn "${{ env.TARGET_GROUP_ARN }}" \
+            --targets Id="$NEW_INSTANCE_ID"
+
+          echo "Waiting for new instance to pass ALB health checks..."
+          aws elbv2 wait target-in-service \
+            --target-group-arn "${{ env.TARGET_GROUP_ARN }}" \
+            --targets Id="$NEW_INSTANCE_ID"
+
+          echo "New instance healthy - deregistering and terminating the old one."
+          aws elbv2 deregister-targets \
+            --target-group-arn "${{ env.TARGET_GROUP_ARN }}" \
+            --targets Id="$OLD_INSTANCE_ID"
+          aws ec2 terminate-instances --instance-ids "$OLD_INSTANCE_ID"

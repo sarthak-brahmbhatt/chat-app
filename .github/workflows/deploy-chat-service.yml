@@ -1,0 +1,172 @@
+name: Deploy chat-service
+
+# Runs on every merge to main that touches chat-service/ - path-filtered so a
+# user-service-only or frontend-only commit never rebuilds/redeploys this
+# service. See deploy-user-service.yml for the equivalent, deliberately
+# SEPARATE workflow for that service.
+#
+# WHY TWO SEPARATE WORKFLOW FILES rather than one parameterized workflow
+# with a matrix or two conditional jobs: the two services' actual deploy
+# MECHANICS differ (this one triggers an ASG Instance Refresh; user-service
+# has no ASG at all, so it swaps a single EC2 instance by hand), so a shared
+# workflow would need real branching logic to cover both anyway - splitting
+# them keeps each file linear and readable, gives each service its own
+# independent pass/fail status in the GitHub UI, and matches this project's
+# consistent preference for explicit-and-a-bit-duplicated over
+# clever-and-abstracted (the same reasoning CLAUDE.md 3.8 already gives for
+# EC2+ASG over ECS/Fargate). Workflow-level `paths:` filtering (used here)
+# is also strictly cheaper than job-level `if:` conditions in a combined
+# workflow - GitHub skips starting the job entirely on a non-matching push,
+# rather than starting a runner and then no-op'ing through its steps.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chat-service/**'
+      - '.github/workflows/deploy-chat-service.yml'
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  # This stack's REAL, currently-deployed values - see deploy-user-service.yml's
+  # equivalent comment for why these are plain env vars, not secrets.
+  ECR_REPO: 786566430552.dkr.ecr.us-east-1.amazonaws.com/chat-app/chat-service
+  LAUNCH_TEMPLATE_ID: lt-0bd8a490c53ead09f
+  ASG_NAME: chat-app-chat-service
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+
+      - name: Compute short SHA
+        id: vars
+        run: echo "sha_short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Same two-tags-same-build reasoning as deploy-user-service.yml:
+      # :latest is the floating default CloudFormation's ChatServiceImageTag
+      # parameter points fresh launches at; :$sha_short is the immutable,
+      # addressable tag this pipeline actually pins the Launch Template to
+      # below, so a later unrelated push overwriting :latest can never
+      # change what an in-flight deploy or a rollback references.
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./chat-service
+          file: ./chat-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REPO }}:latest
+            ${{ env.ECR_REPO }}:${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha,scope=chat-service
+          cache-to: type=gha,mode=max,scope=chat-service
+
+      # Identical patch-not-regenerate approach as deploy-user-service.yml -
+      # see that file's comment for the full reasoning (preserves
+      # MysqlRootPassword/JwtSecret/DataInstancePrivateIp and the
+      # -XX:MaxRAMPercentage=75.0 step-11 JVM tuning already baked into the
+      # current UserData, without this workflow ever needing to know those
+      # values itself).
+      - name: Patch Launch Template UserData with new image tag
+        id: lt
+        run: |
+          set -euo pipefail
+          NEW_IMAGE="${{ env.ECR_REPO }}:${{ steps.vars.outputs.sha_short }}"
+
+          OLD_USER_DATA_B64=$(aws ec2 describe-launch-template-versions \
+            --launch-template-id "${{ env.LAUNCH_TEMPLATE_ID }}" \
+            --versions '$Latest' \
+            --query 'LaunchTemplateVersions[0].LaunchTemplateData.UserData' \
+            --output text)
+
+          NEW_USER_DATA_B64=$(echo "$OLD_USER_DATA_B64" | base64 -d | \
+            sed -E "s#${{ env.ECR_REPO }}:[A-Za-z0-9_.-]+#${NEW_IMAGE}#g" | \
+            base64 -w0)
+
+          NEW_VERSION=$(aws ec2 create-launch-template-version \
+            --launch-template-id "${{ env.LAUNCH_TEMPLATE_ID }}" \
+            --source-version '$Latest' \
+            --launch-template-data "{\"UserData\":\"${NEW_USER_DATA_B64}\"}" \
+            --query 'LaunchTemplateVersion.VersionNumber' \
+            --output text)
+
+          echo "New Launch Template version: $NEW_VERSION (image: $NEW_IMAGE)"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+          aws ec2 modify-launch-template \
+            --launch-template-id "${{ env.LAUNCH_TEMPLATE_ID }}" \
+            --default-version "$NEW_VERSION"
+
+      # DesiredConfiguration.LaunchTemplate.Version pins this SPECIFIC
+      # refresh to the version just created above, without needing to
+      # separately update the ASG resource's own baseline LaunchTemplate
+      # property first - AWS updates that baseline to match automatically
+      # once the refresh completes successfully.
+      #
+      # MinHealthyPercentage: 90 with this ASG's min/max of 1/4 (CLAUDE.md
+      # 3.8): at typically-desired capacity 1, 90% forces AWS to launch the
+      # REPLACEMENT instance and confirm it healthy before terminating the
+      # original - the same launch-before-terminate safety property
+      # deploy-user-service.yml implements by hand for its own single
+      # instance, here provided by the Instance Refresh feature itself.
+      # InstanceWarmup: 120s gives a fresh instance real time to boot, pull
+      # its image, and start the JVM (CLAUDE.md 3.6/step 11) before being
+      # counted as available for the next batch.
+      - name: Start ASG instance refresh
+        id: refresh
+        run: |
+          set -euo pipefail
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "${{ env.ASG_NAME }}" \
+            --preferences '{"MinHealthyPercentage": 90, "InstanceWarmup": 120}' \
+            --desired-configuration "LaunchTemplate={LaunchTemplateId=${{ env.LAUNCH_TEMPLATE_ID }},Version=${{ steps.lt.outputs.version }}}" \
+            --query 'InstanceRefreshId' \
+            --output text)
+          echo "Instance refresh started: $REFRESH_ID"
+          echo "id=$REFRESH_ID" >> "$GITHUB_OUTPUT"
+
+      # Polls rather than firing-and-forgetting, so a broken image/app that
+      # never passes health checks shows up as a FAILED GitHub Actions run,
+      # not a silent green checkmark on a refresh that's actually stuck or
+      # rolling back in the background. 15 minutes / 15s polls is generous
+      # for up to 4 instances cycling through ~2min each; if this times out
+      # the AWS-side refresh keeps running regardless - only this
+      # workflow's own polling stops, which is why the timeout case below
+      # says so explicitly rather than implying the refresh itself failed.
+      - name: Wait for instance refresh to complete
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "${{ env.ASG_NAME }}" \
+              --instance-refresh-ids "${{ steps.refresh.outputs.id }}" \
+              --query 'InstanceRefreshes[0].Status' \
+              --output text)
+            echo "[$i/60] Instance refresh status: $STATUS"
+            case "$STATUS" in
+              Successful)
+                exit 0
+                ;;
+              Failed|Cancelled|RollbackFailed|RollbackSuccessful)
+                echo "Instance refresh ended in status $STATUS" >&2
+                exit 1
+                ;;
+            esac
+            sleep 15
+          done
+          echo "Timed out waiting for instance refresh after 15 minutes - it is still running in AWS, this workflow just stopped watching it. Check the console." >&2
+          exit 1
