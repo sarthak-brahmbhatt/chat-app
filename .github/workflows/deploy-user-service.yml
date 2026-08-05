@@ -156,10 +156,47 @@ jobs:
         run: |
           set -euo pipefail
 
-          OLD_INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=chat-app-user-service" "Name=instance-state-name,Values=running" \
+          # Filtering by tag:Name alone isn't unique: that tag is stamped
+          # on EVERY instance ever launched from this Launch Template (it
+          # comes from the template's own TagSpecifications, applied
+          # unconditionally on launch), including an orphan left behind by
+          # a PREVIOUS run of this exact workflow that failed after
+          # run-instances but before reaching the deregister/terminate
+          # step below. Filtering by tag:aws:ec2launchtemplate:id (the tag
+          # EC2 itself auto-applies, recording which template launched the
+          # instance) is tighter and more intentional, but - confirmed by
+          # hand against this exact incident, not assumed - it does NOT
+          # by itself make today's specific case unique either, since both
+          # candidates were launched from this same template. Registered
+          # ALB targets were also checked as a possible alternative source
+          # of truth and found to show the same two instances, for the
+          # same reason (the orphan got as far as register-targets before
+          # that earlier run died) - so there is no query that can
+          # correctly guess which of two real, currently-running
+          # instances is "the right one" once a previous run has left an
+          # orphan behind. That's not something to paper over with a
+          # cleverer filter; it's exactly what the check below is for.
+          MATCHES=$(aws ec2 describe-instances \
+            --filters "Name=tag:aws:ec2launchtemplate:id,Values=${{ env.LAUNCH_TEMPLATE_ID }}" "Name=instance-state-name,Values=running" \
             --query 'Reservations[].Instances[].InstanceId' \
             --output text)
+
+          # `--output text` joins multiple results with TABS on one line,
+          # not newlines - counting words (not lines) is what actually
+          # catches "more than one" here. This is the exact bug that
+          # previously let two IDs silently concatenate into one garbage
+          # string and get handed to a downstream `aws` call as if it were
+          # a single instance ID.
+          COUNT=$(echo "$MATCHES" | wc -w | tr -d ' ')
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::Expected exactly 1 running instance from Launch Template ${{ env.LAUNCH_TEMPLATE_ID }}, found $COUNT: [$MATCHES]"
+            echo "This almost always means a PREVIOUS run of this workflow failed partway through and left an orphaned instance running." >&2
+            echo "Resolve manually before retrying: check which instance(s) are registered in the target group (aws elbv2 describe-target-health --target-group-arn ${{ env.TARGET_GROUP_ARN }}), confirm which one is actually meant to be current, then terminate the other(s) and deregister them from the target group." >&2
+            exit 1
+          fi
+
+          OLD_INSTANCE_ID="$MATCHES"
           echo "Current instance: $OLD_INSTANCE_ID"
 
           # Reuse the same subnet the current instance is in, rather than
