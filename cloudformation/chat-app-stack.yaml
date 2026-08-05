@@ -534,6 +534,46 @@ Resources:
             #!/bin/bash
             set -euxo pipefail
 
+            # --- Make this script re-run on EVERY boot, not just the first ---
+            # By default cloud-init runs user-data once per INSTANCE, not per
+            # boot. That default is a real trap for this specific resource:
+            # changing UserData on an AWS::EC2::Instance is an
+            # "Update requires: Some interruptions" property, so CloudFormation
+            # applies it by STOPPING AND STARTING the instance rather than
+            # replacing it (observed directly - the instance kept its id and
+            # only its LaunchTime changed). The instance's UserData ATTRIBUTE
+            # gets the new value, but the once-only script never re-runs, so
+            # the on-disk docker-compose.yml keeps the OLD values forever and
+            # the change silently has no effect. That is exactly how this
+            # stack ran for hours with an empty MYSQL_ROOT_PASSWORD, MySQL
+            # refusing to initialize, while the template "said" otherwise.
+            #
+            # Setting scripts-user to `always` makes cloud-init re-run this
+            # script on every boot - so a stop/start (i.e. what a
+            # CloudFormation secret change actually does) genuinely
+            # reconverges the instance. Chosen over the alternative fix of
+            # forcing true replacement (e.g. moving this instance behind its
+            # own Launch Template, whose version changes DO force
+            # recreation - that's why UserServiceInstance replaces
+            # correctly): replacement would give a new root EBS volume and
+            # therefore destroy the mysql-data volume on every secret
+            # rotation. Wiping the database to change a password is the
+            # wrong tradeoff for the stateful tier, even though it IS the
+            # right one for the stateless services above.
+            #
+            # This depends on everything below being idempotent: dnf install
+            # no-ops when already installed, and `docker-compose up -d`
+            # converges rather than duplicating containers.
+            #
+            # NOTE: this drop-in can only take effect from the NEXT boot
+            # onward - the boot that first installs it is, by definition,
+            # still running under the old once-only behavior.
+            mkdir -p /etc/cloud/cloud.cfg.d
+            cat > /etc/cloud/cloud.cfg.d/99-rerun-user-data.cfg <<'CLOUDCFG'
+            cloud_final_modules:
+             - [scripts-user, always]
+            CLOUDCFG
+
             # --- Docker + standalone docker-compose on Amazon Linux 2023 ---
             # AL2023 ships Docker directly via dnf (no extra repo setup
             # needed, unlike older Amazon Linux). docker-compose itself
@@ -546,9 +586,14 @@ Resources:
             systemctl enable --now docker
             usermod -aG docker ec2-user
 
-            curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
-              -o /usr/local/bin/docker-compose
-            chmod +x /usr/local/bin/docker-compose
+            # -f so a re-run (see the every-boot block above) doesn't fail on
+            # an existing binary, and only downloaded when missing so a
+            # reboot isn't gated on GitHub being reachable.
+            if [ ! -x /usr/local/bin/docker-compose ]; then
+              curl -fL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
+                -o /usr/local/bin/docker-compose
+              chmod +x /usr/local/bin/docker-compose
+            fi
 
             mkdir -p /opt/chat-app-data/mysql-init
             cd /opt/chat-app-data
@@ -769,6 +814,22 @@ Resources:
               # load. Raising the percentage well past the 25% default
               # leaves real headroom for the OS/Docker daemon while giving
               # the JVM most of the instance's memory to actually use.
+              #
+              # `set +x` around ONLY this command, re-enabled immediately
+              # after: the script-wide `set -x` above is deliberately kept
+              # (tracing every step is what made the empty-secret and
+              # crash-loop failures diagnosable from console output alone),
+              # but xtrace prints each command with its arguments FULLY
+              # EXPANDED - which for this one line means MYSQL_PASSWORD and
+              # JWT_SECRET in plaintext, written to the EC2 console log,
+              # readable by anyone holding ec2:GetConsoleOutput. Narrowing
+              # the suppression to this single line keeps the debugging
+              # value everywhere else while removing the only place secrets
+              # actually appear. (Heredoc BODIES are never traced by
+              # xtrace - only commands are - so the compose file written on
+              # the data instance doesn't need the same treatment; verified
+              # rather than assumed.)
+              set +x
               docker run -d \
                 --name user-service \
                 --restart unless-stopped \
@@ -782,6 +843,7 @@ Resources:
                 -e JWT_SECRET='${JwtSecret}' \
                 -e JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75.0' \
                 ${UserServiceEcrRepository.RepositoryUri}:${UserServiceImageTag}
+              set -x
         TagSpecifications:
           - ResourceType: instance
             Tags:
@@ -887,6 +949,10 @@ Resources:
               # chat-service has no Redis dependency anywhere in its code -
               # only user-service uses Redis, for the refresh-token store
               # (CLAUDE.md 3.3).
+              #
+              # `set +x` / `set -x` around this one command only - same
+              # secret-tracing reasoning as UserServiceLaunchTemplate above.
+              set +x
               docker run -d \
                 --name chat-service \
                 --restart unless-stopped \
@@ -899,6 +965,7 @@ Resources:
                 -e JWT_SECRET='${JwtSecret}' \
                 -e JAVA_TOOL_OPTIONS='-XX:MaxRAMPercentage=75.0' \
                 ${ChatServiceEcrRepository.RepositoryUri}:${ChatServiceImageTag}
+              set -x
         TagSpecifications:
           - ResourceType: instance
             Tags:
