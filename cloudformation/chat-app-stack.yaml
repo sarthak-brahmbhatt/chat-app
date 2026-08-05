@@ -722,10 +722,39 @@ Resources:
               # get-login-password` transparently uses whatever
               # credentials the instance metadata service hands it, which
               # is exactly the point of attaching an instance profile.
-              aws ecr get-login-password --region ${AWS::Region} \
-                | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+              #
+              # Retries ONLY this login+pull pair, up to 5 attempts with a
+              # short fixed backoff - deliberately narrow, to absorb
+              # TRANSIENT failures only (a network blip, ECR briefly
+              # throttling right after a fresh push). It does NOT retry
+              # forever: if the image tag genuinely doesn't exist yet - the
+              # case on every FIRST deploy, since create-stack brings up an
+              # empty repository before anything has been pushed to it -
+              # no amount of retrying fixes that, so the script exits
+              # non-zero after the 5th attempt and this instance fails its
+              # ALB health check exactly as designed. Recovery from THAT
+              # case is a Launch Template version bump + redeploy once an
+              # image actually exists (CLAUDE.md 3.8's own deployment
+              # mechanism) - not this loop waiting around for one to
+              # eventually appear, which would just delay the health check
+              # from ever getting a chance to notice anything is wrong.
+              pull_user_service_image() {
+                aws ecr get-login-password --region ${AWS::Region} \
+                  | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com \
+                  && docker pull ${UserServiceEcrRepository.RepositoryUri}:${UserServiceImageTag}
+              }
 
-              docker pull ${UserServiceEcrRepository.RepositoryUri}:${UserServiceImageTag}
+              attempt=1
+              max_attempts=5
+              until pull_user_service_image; do
+                if [ "$attempt" -ge "$max_attempts" ]; then
+                  echo "ECR login/pull failed after $max_attempts attempts - giving up" >&2
+                  exit 1
+                fi
+                echo "ECR login/pull attempt $attempt/$max_attempts failed, retrying in 5s..." >&2
+                attempt=$((attempt + 1))
+                sleep 5
+              done
 
               # JAVA_TOOL_OPTIONS, not a Dockerfile change: this is picked
               # up automatically by the `java` launcher (the image's own
@@ -825,10 +854,31 @@ Resources:
               systemctl enable --now docker
               usermod -aG docker ec2-user
 
-              aws ecr get-login-password --region ${AWS::Region} \
-                | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+              # Same bounded-retry reasoning as UserServiceLaunchTemplate
+              # above: absorbs a transient network/ECR blip, does NOT wait
+              # around for an image tag that doesn't exist yet - that case
+              # (guaranteed on the first deploy, before anything's been
+              # pushed to the freshly-created empty repository) is meant
+              # to fail fast into the ASG's own ELB health check, which is
+              # exactly what its HealthCheckType/HealthCheckGracePeriod
+              # below are configured to detect and cycle.
+              pull_chat_service_image() {
+                aws ecr get-login-password --region ${AWS::Region} \
+                  | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com \
+                  && docker pull ${ChatServiceEcrRepository.RepositoryUri}:${ChatServiceImageTag}
+              }
 
-              docker pull ${ChatServiceEcrRepository.RepositoryUri}:${ChatServiceImageTag}
+              attempt=1
+              max_attempts=5
+              until pull_chat_service_image; do
+                if [ "$attempt" -ge "$max_attempts" ]; then
+                  echo "ECR login/pull failed after $max_attempts attempts - giving up" >&2
+                  exit 1
+                fi
+                echo "ECR login/pull attempt $attempt/$max_attempts failed, retrying in 5s..." >&2
+                attempt=$((attempt + 1))
+                sleep 5
+              done
 
               # Same -XX:MaxRAMPercentage=75.0 reasoning as
               # UserServiceLaunchTemplate above - this is the service step
