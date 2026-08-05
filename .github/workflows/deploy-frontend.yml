@@ -1,0 +1,87 @@
+name: Deploy frontend
+
+# Runs on every merge to main that touches the Angular app - matches
+# CLAUDE.md 3.8's "deploy on merge" framing already established for the
+# backend (Launch Template versioning + ASG Instance Refresh), just for the
+# frontend's own deploy mechanism (S3 sync + CloudFront invalidation)
+# instead. Path-filtered to frontend/** so a backend-only commit doesn't
+# trigger a frontend redeploy for nothing.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # TODO (not solved here - see cloudformation/frontend-stack.yaml's own
+      # TODO comment): this build has no real backend API/WS URL yet.
+      # frontend/src/environments/environment.production.ts (or equivalent)
+      # needs to point at the deployed ALB - or, longer-term,
+      # api.sarthak-chat-app.beer once CLAUDE.md 3.8's DNS is wired up -
+      # before this step means anything beyond "it compiles."
+      - name: Build (production)
+        working-directory: frontend
+        run: npx ng build --configuration production
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # CLAUDE.md 3.8: access keys for the manually-created, scoped-down
+          # IAM user get pushed to GitHub Secrets - this is that IAM user's
+          # credentials, not the EC2 instance role used elsewhere in this
+          # project (that role only exists on EC2, GitHub Actions has no
+          # access to it).
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # --delete removes anything in the bucket that's no longer part of
+      # this build (e.g. a previous build's now-orphaned hashed JS/CSS
+      # bundle) - without it, old fingerprinted files would accumulate in
+      # the bucket forever, unreferenced by the current index.html but
+      # still costing storage and still fetchable by anyone with the old
+      # URL.
+      - name: Sync build output to S3
+        run: |
+          aws s3 sync frontend/dist/frontend/browser \
+            s3://${{ secrets.FRONTEND_S3_BUCKET }} \
+            --delete
+
+      # WHY THIS STEP IS NOT OPTIONAL: CloudFront caches objects at edge
+      # locations according to the cache policy's TTL (frontend-stack.yaml
+      # uses the AWS-managed CachingOptimized policy) - completely
+      # independent of whatever the S3 sync above just did. The sync only
+      # changes what's sitting in the ORIGIN bucket; every edge location
+      # that already cached the previous build keeps serving those old
+      # bytes until its cached copy naturally expires. For a normal static
+      # site this might just mean "stale content for a while," but for an
+      # Angular build specifically it can be actively BROKEN: Angular
+      # fingerprints its JS/CSS bundle filenames per build (e.g.
+      # main-a1b2c3.js), and `s3 sync --delete` above just removed the
+      # PREVIOUS build's fingerprinted files from the origin entirely - a
+      # visitor served a stale cached index.html (referencing the old
+      # filename) would get a 404 fetching a bundle that no longer exists
+      # anywhere, not just an outdated version of the app. Invalidating
+      # "/*" forces every edge location to fetch fresh copies from the
+      # origin on the next request, so index.html and the bundle it
+      # references are always from the SAME build.
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ secrets.FRONTEND_CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/*"

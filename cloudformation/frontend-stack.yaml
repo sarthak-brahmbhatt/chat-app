@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  chat-app frontend (CLAUDE.md 3.8): private S3 bucket + CloudFront (Origin
+  Access Control, no public bucket policy), CloudFront's own default
+  domain/cert (no custom domain here). Deliberately separate from
+  chat-app-stack.yaml - see the comment block below for why, and for an
+  unsolved TODO on wiring the real backend URL into the Angular build.
+
+# =============================================================================
+# Why this is a SEPARATE stack from chat-app-stack.yaml (the backend): that
+# stack is meant to be created/deleted per session (CLAUDE.md 3.8's cost
+# posture - an ALB bills hourly whether or not it's used). This one costs
+# close to nothing while idle (a few static files in S3 + CloudFront's free
+# tier easily covers light traffic) and is meant to be deployed ONCE and
+# left running, updated in place by the GitHub Actions workflow on every
+# merge rather than torn down and recreated alongside the backend.
+#
+# TODO (deliberately NOT solved by this template - out of scope for the
+# request that produced it): Angular's production build needs the real
+# backend API/WS URL baked in via environment configuration
+# (frontend/src/environments/environment.production.ts or equivalent)
+# before `ng build --configuration production` runs. That value doesn't
+# exist yet - it depends on chat-app-stack.yaml's ALB, which only gets a
+# real DNS name once that stack is actually deployed (and, per CLAUDE.md
+# 3.8, would eventually be api.sarthak-chat-app.beer once Porkbun's DNS is
+# pointed at it, not the ALB's raw AWS domain name directly). Wiring that
+# up is follow-up work, not part of this stack.
+# =============================================================================
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # S3 BUCKET - private origin for CloudFront, not a public website bucket.
+  # No BucketName property is set deliberately: S3 bucket names are globally
+  # unique across ALL AWS accounts, not just this one, so letting
+  # CloudFormation auto-generate one (from the stack name + logical ID +
+  # a random suffix) avoids a name collision that a fixed, guessed name
+  # could hit. The actual generated name is read back via this stack's
+  # S3BucketName output instead of being predicted ahead of time.
+  # ---------------------------------------------------------------------------
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    # This bucket holds the live, deployed frontend - unlike the backend
+    # stack's resources (meant to be deleted per session), accidentally
+    # deleting this one would take the whole site down and lose whatever
+    # was last synced to it. Retain means a stack DELETE leaves the bucket
+    # (and its contents) behind rather than removing it - matches this
+    # stack's "deploy once, leave running" framing in the Description above.
+    DeletionPolicy: Retain
+    Properties:
+      # Blocks every form of public access at the bucket level - belt and
+      # suspenders alongside simply never attaching a public-read bucket
+      # policy. This is what "private S3 bucket" concretely means: even a
+      # future accidental bucket policy change couldn't make objects
+      # public while this is set.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # ---------------------------------------------------------------------------
+  # ORIGIN ACCESS CONTROL - what actually lets CloudFront read from a PRIVATE
+  # bucket without the bucket needing a public-read policy. CloudFront signs
+  # every request it makes to the S3 origin with SigV4 (the same request-
+  # signing scheme the AWS CLI/SDKs use), and the bucket policy below only
+  # trusts requests signed this way, from this specific distribution - not
+  # from anyone else, and not from the bucket's own S3 URL directly. OAC is
+  # the current (2022+) mechanism for this; it replaces the older "Origin
+  # Access Identity" (OAI) approach, which is still around for legacy
+  # distributions but is no longer the recommended path for a new one.
+  # ---------------------------------------------------------------------------
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: chat-app-frontend-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ---------------------------------------------------------------------------
+  # CLOUDFRONT DISTRIBUTION - no custom domain/ACM cert (per this task's
+  # explicit scope): ViewerCertificate below uses CloudFrontDefaultCertificate,
+  # which is what puts this site on CloudFront's own *.cloudfront.net domain
+  # with a free, automatically-managed certificate - HTTPS still works, just
+  # not under sarthak-chat-app.beer yet. Pointing the real domain here (and
+  # requesting the ACM cert CLAUDE.md 3.8 already has for the backend's
+  # subdomain, or a separate one for the root domain) is a later step once
+  # this is confirmed working, not part of this template.
+  # ---------------------------------------------------------------------------
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        # Cheapest price class - only US/Canada/Europe edge locations. A
+        # reasonable default for a project whose whole AWS posture is
+        # minimizing fixed/ongoing cost (same reasoning as skipping the
+        # ALB and NAT Gateway elsewhere in CLAUDE.md 3.8) - broaden this if
+        # global latency ever actually matters for real users.
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: FrontendS3Origin
+            # RegionalDomainName (bucket-name.s3.REGION.amazonaws.com), not
+            # the older global DomainName (bucket-name.s3.amazonaws.com) -
+            # the regional form avoids an extra redirect CloudFront would
+            # otherwise have to follow on every origin fetch.
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+            S3OriginConfig:
+              # Deliberately empty: this field exists for the OLDER
+              # Origin Access Identity mechanism. When using OAC (above)
+              # instead, it's required to be present but blank - CloudFront
+              # still needs to see an S3OriginConfig block to know this is
+              # an S3 origin at all, it just isn't the thing doing the
+              # actual access control anymore.
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # The AWS-managed "CachingOptimized" cache policy - a fixed,
+          # global ID that's the same in every AWS account (it's an
+          # AWS-owned managed policy, not something this account created),
+          # so it's safe to reference directly rather than defining a
+          # custom AWS::CloudFront::CachePolicy resource just to reinvent
+          # what this one already does: cache based on nothing but the
+          # request path (no cookies/query strings affecting the cache
+          # key, which is exactly right for a static SPA build where the
+          # same URL always means the same file).
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        # Angular's router handles paths like /chat or /login entirely
+        # CLIENT-SIDE - there's no actual /chat object in the S3 bucket.
+        # Without this rewrite, requesting /chat directly (e.g. a page
+        # refresh, or sharing a deep link) would get a 403 from S3 (via
+        # CloudFront - a private bucket returns 403, not 404, for a
+        # missing key when the request is otherwise validly signed) with
+        # no HTML at all, instead of loading index.html and letting
+        # Angular's router take over. This is what actually makes
+        # client-side routing work behind CloudFront - not optional
+        # SPA-specific bonus, a hard requirement for a multi-route Angular
+        # app.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  # ---------------------------------------------------------------------------
+  # BUCKET POLICY - the other half of OAC: grants CloudFront's service
+  # principal read access, but ONLY when the request comes from THIS
+  # specific distribution (the AWS:SourceArn condition) - not from any
+  # CloudFront distribution in any account. This is what keeps the bucket
+  # genuinely private (no public-read statement anywhere) while still
+  # letting the one distribution that's supposed to serve it actually do so.
+  # Defined as a separate resource from the bucket (rather than inline
+  # BucketPolicy content) because it needs to reference the distribution's
+  # ARN, which doesn't exist yet at the point the bucket itself is defined
+  # above - CloudFormation resolves this ordering automatically via the
+  # !Sub reference to FrontendDistribution.Id below.
+  # ---------------------------------------------------------------------------
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution.Id}'
+
+Outputs:
+
+  CloudFrontDomainName:
+    Description: >-
+      The site's live URL is https://<this value>/. Also needed by the
+      GitHub Actions deploy workflow (as the invalidation target) via its
+      distribution ID, see CloudFrontDistributionId below.
+    Value: !GetAtt FrontendDistribution.DomainName
+
+  S3BucketName:
+    Description: >-
+      Sync `ng build` output here (e.g. `aws s3 sync dist/frontend/browser
+      s3://<this value> --delete`).
+    Value: !Ref FrontendBucket
+
+  CloudFrontDistributionId:
+    Description: >-
+      NOT explicitly requested as an output, but added deliberately: the
+      GitHub Actions workflow this stack was built alongside needs this
+      exact value to run `aws cloudfront create-invalidation
+      --distribution-id <this value>` after every sync - without it,
+      that step would have nothing to invalidate against except a manual
+      console lookup on every deploy.
+    Value: !GetAtt FrontendDistribution.Id
