@@ -23,3 +23,8 @@ build/
 load-test/users.json
 load-test/docker-stats.csv
 load-test/k6-run.log
+
+# Real secrets for the deployed chat-app CloudFormation stack (MysqlRootPassword,
+# JwtSecret) - generated via openssl rand, never meant to sit in git history the
+# way docker-compose.yml's dev-only defaults deliberately do (CLAUDE.md 3.3).
+.env.aws.local
