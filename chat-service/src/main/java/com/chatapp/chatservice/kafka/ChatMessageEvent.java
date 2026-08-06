@@ -19,5 +19,6 @@ import java.time.Instant;
  * redelivery), and "when was this message actually sent" should reflect
  * that original moment, not whenever it happened to get persisted.
  */
-public record ChatMessageEvent(String messageId, String senderId, String recipientId, String content, Instant sentAt) {
+public record ChatMessageEvent(String messageId, String senderId, String recipientId, String content, Instant sentAt)
+        implements ChatTopicEvent {
 }

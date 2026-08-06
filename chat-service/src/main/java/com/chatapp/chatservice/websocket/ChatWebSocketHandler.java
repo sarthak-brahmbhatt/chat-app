@@ -7,6 +7,7 @@ import com.chatapp.chatservice.dto.TickAck;
 import com.chatapp.chatservice.kafka.ChatMessagePublisher;
 import com.chatapp.chatservice.security.JwtValidator;
 import com.chatapp.chatservice.service.ChatMessageService;
+import com.chatapp.chatservice.service.PendingDeliveryNotification;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.jsonwebtoken.Claims;
@@ -20,6 +21,7 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -147,6 +149,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             session.getAttributes().put(USER_ID_ATTRIBUTE, userId);
             connectionRegistry.register(userId, session);
             log.info("WebSocket connection {} authenticated as user {}", session.getId(), userId);
+            notifyPendingDeliveries(userId);
         } catch (JwtException | IllegalArgumentException e) {
             // JwtException's subtypes cover expired/malformed/bad-signature
             // tokens; IllegalArgumentException covers a blank/empty string —
@@ -240,25 +243,38 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      * recipient's client confirming an incoming_message actually reached it.
      * senderId comes from the client (see DeliveredAck's class comment for
      * why that's a deliberate, accepted tradeoff rather than chat-service
-     * tracking its own messageId -> senderId map).
+     * tracking its own messageId -> senderId map). recipientId is read off
+     * THIS session's own auth attribute — the current session belongs to
+     * whoever just received the message and is acking it.
      *
      * Two things happen here now, deliberately UNCONDITIONAL on each other:
-     * persisting the delivery (ChatMessageService.markDelivered) always
-     * runs, regardless of whether the live double-tick below succeeds — a
-     * message history read later must show this message as delivered even
-     * if the sender had ALREADY disconnected by the time this ack arrived
-     * (see the next paragraph), so persistence can't be conditioned on the
-     * live-delivery branch succeeding.
+     *   - Persisting the delivery is now ASYNC, via Kafka
+     *     (ChatMessagePublisher.publishDelivered), not a direct synchronous
+     *     UPDATE. It's published to the SAME topic and the SAME partition
+     *     key (conversationKey(senderId, recipientId)) as the original
+     *     message — Kafka only guarantees ordering within one partition,
+     *     but a delivered_ack can only ever be produced after the message
+     *     it acknowledges was already produced (there's nothing to ack
+     *     otherwise), so same-partition ordering is enough to guarantee
+     *     ChatMessageConsumer always processes the insert before this
+     *     delivery event, structurally — not "usually," the way a direct
+     *     UPDATE racing Kafka's own insert used to be (see
+     *     ChatMessageService.markDelivered's Javadoc for what that looked
+     *     like before this change).
+     *   - The LIVE double-tick (sendDoubleTickIfConnected) stays entirely
+     *     synchronous and immediate — this mirrors CLAUDE.md 3.4's own
+     *     reasoning for why single-tick doesn't wait on Kafka either:
+     *     confirming something to a live, connected party right now should
+     *     never be coupled to how fast the durable write happens to land.
      *
      * If the original sender is no longer connected, the LIVE double-tick
-     * is silently dropped — there is no channel left to deliver it over.
-     * This isn't a new gap: with no offline-message-queue (out of scope),
-     * a live double-tick was already only ever meaningful for a sender
-     * who's still connected to receive it. The PERSISTED delivery status
-     * (new as of this endpoint) is different — it's written regardless of
-     * whether the sender is still around, specifically so that when the
-     * sender reopens this conversation later, history shows the message as
-     * delivered, even though they never saw a live tick change for it.
+     * is silently dropped — sendDoubleTickIfConnected's own comment covers
+     * why. Since the reconnect-sweep feature (ChatWebSocketHandler.authenticate
+     * -> notifyPendingDeliveries), this is no longer a permanent gap for the
+     * SENDER specifically either: whenever the sender's own connection next
+     * cycles for any reason, nothing about the SENDER'S side needs fixing
+     * here, since the persisted delivery status this method's Kafka publish
+     * writes is already correct by the time anyone reads history again.
      */
     private void handleDeliveredAck(WebSocketSession session, String payload) {
         DeliveredAck ack;
@@ -274,24 +290,56 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        chatMessageService.markDelivered(ack.messageId());
+        String recipientId = (String) session.getAttributes().get(USER_ID_ATTRIBUTE);
+        chatMessagePublisher.publishDelivered(ack.senderId(), recipientId, ack.messageId());
+        sendDoubleTickIfConnected(ack.senderId(), ack.messageId());
+    }
 
-        Optional<WebSocketSession> senderSession = connectionRegistry.find(ack.senderId());
+    /**
+     * Sends a live double-tick to senderId if (and only if) they currently
+     * have a connected session — shared by handleDeliveredAck (the live
+     * per-message path) and notifyPendingDeliveries (the reconnect-sweep,
+     * which can surface many messages from possibly-many different original
+     * senders at once). Never throws: a missing session or a failed send is
+     * logged, not propagated, since neither should ever affect the CALLING
+     * session (the recipient who just acked, or the recipient who just
+     * reconnected) in any way.
+     */
+    private void sendDoubleTickIfConnected(String senderId, String messageId) {
+        Optional<WebSocketSession> senderSession = connectionRegistry.find(senderId);
         if (senderSession.isEmpty()) {
-            log.info("Sender {} no longer connected; live double-tick for message {} dropped (delivery was still persisted)",
-                    ack.senderId(), ack.messageId());
+            log.info("Sender {} not connected; live double-tick for message {} not sent (delivery was still persisted)",
+                    senderId, messageId);
             return;
         }
 
         try {
-            TickAck doubleTick = TickAck.doubleTick(ack.messageId());
+            TickAck doubleTick = TickAck.doubleTick(messageId);
             senderSession.get().sendMessage(new TextMessage(objectMapper.writeValueAsString(doubleTick)));
         } catch (IOException e) {
             // Same reasoning as deliverIfRecipientConnected's catch: the
             // sender's socket looked connected a moment ago but failed on
             // send. Logged, not propagated — this doesn't affect the
-            // CURRENT session (the recipient who sent the ack) at all.
-            log.warn("Failed to deliver double-tick for message {} to sender {}: {}", ack.messageId(), ack.senderId(), e.getMessage());
+            // CALLING session at all.
+            log.warn("Failed to deliver double-tick for message {} to sender {}: {}", messageId, senderId, e.getMessage());
+        }
+    }
+
+    /**
+     * Sweeps every message where the user who JUST authenticated on this
+     * session is the recipient and delivery was never recorded, marks each
+     * delivered, and live-notifies whichever original sender happens to be
+     * connected right now — see ChatMessageService.sweepUndeliveredForRecipient
+     * for the full reasoning (why this is needed at all, why it's safe to
+     * run on every connect including ordinary first-time ones, and the
+     * accepted concurrent-double-sweep tradeoff). Deliberately does not
+     * re-send message CONTENT to recipientId's own session — see that same
+     * Javadoc for why.
+     */
+    private void notifyPendingDeliveries(String recipientId) {
+        List<PendingDeliveryNotification> notifications = chatMessageService.sweepUndeliveredForRecipient(recipientId);
+        for (PendingDeliveryNotification notification : notifications) {
+            sendDoubleTickIfConnected(notification.senderId(), notification.messageId());
         }
     }
 

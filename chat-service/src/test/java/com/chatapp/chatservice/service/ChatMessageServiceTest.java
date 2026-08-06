@@ -14,8 +14,10 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.groups.Tuple.tuple;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -127,17 +129,46 @@ class ChatMessageServiceTest {
     }
 
     @Test
-    void markDelivered_whenNoRowMatchesYet_doesNotThrow() {
-        // The documented race (ChatMessageService.markDelivered's own class
-        // comment): a delivered_ack can arrive before Kafka's consumer has
-        // persisted the row. The repository's bulk UPDATE simply matches
-        // zero rows in that case - this must be handled gracefully (logged,
-        // not thrown), not treated as an error.
+    void markDelivered_whenNoRowMatches_doesNotThrow() {
+        // As of the Kafka-ordering fix (ChatMessageService.markDelivered's
+        // own class comment), this method's only caller is the sweep below,
+        // so a zero-rows result here would only realistically come from the
+        // accepted concurrent-double-sweep race - either way, this must be
+        // handled gracefully (logged, not thrown), not treated as an error.
         ChatMessageService service = new ChatMessageService(chatMessageRepository);
-        when(chatMessageRepository.markDelivered("m-not-yet-persisted")).thenReturn(0);
+        when(chatMessageRepository.markDelivered("m-already-handled")).thenReturn(0);
 
-        service.markDelivered("m-not-yet-persisted");
+        service.markDelivered("m-already-handled");
 
-        verify(chatMessageRepository).markDelivered("m-not-yet-persisted");
+        verify(chatMessageRepository).markDelivered("m-already-handled");
+    }
+
+    @Test
+    void sweepUndeliveredForRecipient_withPendingMessages_marksEachDeliveredAndReturnsSenderPairs() {
+        ChatMessageService service = new ChatMessageService(chatMessageRepository);
+        Instant t1 = Instant.parse("2026-01-01T10:00:00Z");
+        Instant t2 = Instant.parse("2026-01-01T10:01:00Z");
+        when(chatMessageRepository.findByRecipientIdAndDeliveredFalse("99")).thenReturn(List.of(
+                message("m-1", "42", "99", "first", t1, false),
+                message("m-2", "7", "99", "second", t2, false)));
+        when(chatMessageRepository.markDelivered(any())).thenReturn(1);
+
+        List<PendingDeliveryNotification> notifications = service.sweepUndeliveredForRecipient("99");
+
+        verify(chatMessageRepository).markDelivered("m-1");
+        verify(chatMessageRepository).markDelivered("m-2");
+        assertThat(notifications).extracting("messageId", "senderId")
+                .containsExactly(tuple("m-1", "42"), tuple("m-2", "7"));
+    }
+
+    @Test
+    void sweepUndeliveredForRecipient_withNoPendingMessages_returnsEmptyListWithoutTouchingRepository() {
+        ChatMessageService service = new ChatMessageService(chatMessageRepository);
+        when(chatMessageRepository.findByRecipientIdAndDeliveredFalse("99")).thenReturn(List.of());
+
+        List<PendingDeliveryNotification> notifications = service.sweepUndeliveredForRecipient("99");
+
+        assertThat(notifications).isEmpty();
+        verify(chatMessageRepository, never()).markDelivered(any());
     }
 }

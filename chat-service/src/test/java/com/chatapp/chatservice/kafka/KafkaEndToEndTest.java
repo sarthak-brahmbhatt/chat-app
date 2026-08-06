@@ -10,6 +10,7 @@ import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.mockito.InOrder;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.listener.MessageListenerContainer;
 import org.springframework.kafka.test.context.EmbeddedKafka;
@@ -21,6 +22,7 @@ import java.time.Duration;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -99,5 +101,33 @@ class KafkaEndToEndTest {
                                 && message.getSenderId().equals("42")
                                 && message.getRecipientId().equals("99")
                                 && message.getContent().equals("hello via real kafka"))));
+    }
+
+    /**
+     * The actual proof that CLAUDE.md 4's delivery-ordering fix holds
+     * through a REAL broker, not just against a mock: publishes a
+     * ChatMessageEvent immediately followed by a MessageDeliveredEvent for
+     * the same messageId (same conversationKey, so guaranteed same
+     * partition), and asserts via Mockito's InOrder that the consumer
+     * processes save() before markDelivered() — exactly the guarantee
+     * ChatMessageConsumer.consume()'s Javadoc claims, verified against a
+     * real Kafka broker's actual delivery order rather than assumed.
+     */
+    @Test
+    void deliveredEventPublishedAfterMessageEvent_isProcessedInOrder() {
+        when(chatMessageRepository.existsByMessageId(anyString())).thenReturn(false);
+        when(chatMessageRepository.markDelivered(anyString())).thenReturn(1);
+
+        MessageListenerContainer container = endpointRegistry.getListenerContainers().iterator().next();
+        ContainerTestUtils.waitForAssignment(container, 3);
+
+        chatMessagePublisher.publish("42", new ChatMessageRequest("message", "m-order-1", "99", "hello"));
+        chatMessagePublisher.publishDelivered("42", "99", "m-order-1");
+
+        InOrder inOrder = inOrder(chatMessageRepository);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            inOrder.verify(chatMessageRepository).save(argThat(message -> message.getMessageId().equals("m-order-1")));
+            inOrder.verify(chatMessageRepository).markDelivered("m-order-1");
+        });
     }
 }

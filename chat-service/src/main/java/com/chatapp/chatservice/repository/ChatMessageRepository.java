@@ -80,4 +80,17 @@ public interface ChatMessageRepository extends JpaRepository<ChatMessage, Long> 
     @Transactional
     @Query("UPDATE ChatMessage m SET m.delivered = true WHERE m.messageId = :messageId")
     int markDelivered(@Param("messageId") String messageId);
+
+    /**
+     * Every message where the given user is the RECIPIENT and delivery
+     * hasn't been recorded yet — the reconnect-sweep's input set
+     * (ChatWebSocketHandler.authenticate, via
+     * ChatMessageService.sweepUndeliveredForRecipient). A plain derived
+     * query, not a bulk UPDATE: the sweep needs each row's messageId AND
+     * senderId afterward (to know who to live-notify), which a bulk
+     * UPDATE's rows-affected count can't provide - a SELECT-first shape is
+     * required here, unlike markDelivered above which only ever needs to
+     * flip one already-known id.
+     */
+    List<ChatMessage> findByRecipientIdAndDeliveredFalse(String recipientId);
 }

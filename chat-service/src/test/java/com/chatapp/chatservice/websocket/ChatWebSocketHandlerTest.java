@@ -5,9 +5,12 @@ import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
 import com.chatapp.chatservice.kafka.ChatMessageEvent;
 import com.chatapp.chatservice.kafka.ChatMessagePublisher;
+import com.chatapp.chatservice.kafka.ChatTopicEvent;
 import com.chatapp.chatservice.kafka.KafkaTopicConfig;
+import com.chatapp.chatservice.kafka.MessageDeliveredEvent;
 import com.chatapp.chatservice.security.JwtValidator;
 import com.chatapp.chatservice.service.ChatMessageService;
+import com.chatapp.chatservice.service.PendingDeliveryNotification;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
@@ -28,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -76,13 +80,13 @@ class ChatWebSocketHandlerTest {
     private WebSocketSession session;
 
     @Mock
-    private KafkaTemplate<String, ChatMessageEvent> kafkaTemplate;
+    private KafkaTemplate<String, ChatTopicEvent> kafkaTemplate;
 
     // A mock, not the real service backed by a mocked repository: this
-    // class tests ChatWebSocketHandler's OWN branching logic (does it call
-    // markDelivered at the right moment, unconditionally of live-delivery
-    // outcome) — ChatMessageServiceTest is where markDelivered's own
-    // behavior (the race documented on that method) gets exercised.
+    // class tests ChatWebSocketHandler's OWN branching logic (does it
+    // publish a delivery event / run the sweep at the right moments) —
+    // ChatMessageServiceTest is where markDelivered/sweepUndeliveredForRecipient's
+    // own behavior gets exercised.
     @Mock
     private ChatMessageService chatMessageService;
 
@@ -105,6 +109,15 @@ class ChatWebSocketHandlerTest {
         // hang, not just one.
         lenient().when(kafkaTemplate.send(anyString(), anyString(), any()))
                 .thenReturn(new CompletableFuture<>());
+
+        // Default stub: no pending deliveries for anyone. authenticate() now
+        // calls sweepUndeliveredForRecipient on EVERY successful auth,
+        // including every authenticatedSession() call the tests below
+        // already make for unrelated reasons — without this default, the
+        // mock would return null and notifyPendingDeliveries's loop would
+        // NPE. Individual tests below override this per-userId where the
+        // sweep itself is what's being tested.
+        lenient().when(chatMessageService.sweepUndeliveredForRecipient(anyString())).thenReturn(List.of());
 
         ChatMessagePublisher chatMessagePublisher = new ChatMessagePublisher(kafkaTemplate);
         handler = new ChatWebSocketHandler(
@@ -351,9 +364,14 @@ class ChatWebSocketHandlerTest {
         TickAck ack = objectMapper.readValue(senderCaptor.getValue().getPayload(), TickAck.class);
         assertThat(ack).isEqualTo(TickAck.doubleTick("m-1"));
 
-        // The persisted delivery flag (new: history feature) - a separate
-        // effect from the live double-tick above, verified separately.
-        verify(chatMessageService).markDelivered("m-1");
+        // The persisted delivery write (CLAUDE.md 4's Kafka-ordering fix) -
+        // a separate, async effect from the live double-tick above, now
+        // published rather than a direct synchronous call. "42:99" is the
+        // SAME conversationKey the original message would have used -
+        // that's what guarantees Kafka processes the insert before this.
+        ArgumentCaptor<ChatTopicEvent> eventCaptor = ArgumentCaptor.forClass(ChatTopicEvent.class);
+        verify(kafkaTemplate).send(eq(KafkaTopicConfig.CHAT_MESSAGES_TOPIC), eq("42:99"), eventCaptor.capture());
+        assertThat(eventCaptor.getValue()).isEqualTo(new MessageDeliveredEvent("m-1"));
     }
 
     @Test
@@ -378,11 +396,55 @@ class ChatWebSocketHandlerTest {
         verify(recipientSession, never()).sendMessage(any());
         verify(recipientSession, never()).close(any());
 
-        // The whole point of persisting delivery UNCONDITIONALLY (see
-        // handleDeliveredAck's class comment): even though there was no
-        // live sender to double-tick, the database still has to record
-        // that this message was delivered, so a later history read shows
-        // it correctly.
-        verify(chatMessageService).markDelivered("m-2");
+        // The whole point of publishing the delivery event UNCONDITIONALLY
+        // (see handleDeliveredAck's class comment): even though there was
+        // no live sender to double-tick right now, the delivery still gets
+        // durably recorded, so a later history read shows it correctly.
+        ArgumentCaptor<ChatTopicEvent> eventCaptor = ArgumentCaptor.forClass(ChatTopicEvent.class);
+        verify(kafkaTemplate).send(eq(KafkaTopicConfig.CHAT_MESSAGES_TOPIC), eq("42:99"), eventCaptor.capture());
+        assertThat(eventCaptor.getValue()).isEqualTo(new MessageDeliveredEvent("m-2"));
+    }
+
+    // --- Reconnect-time delivery sweep (CLAUDE.md 3.1/4) ---
+
+    @Test
+    void authenticate_withPendingUndeliveredMessages_notifiesConnectedOriginalSender() throws Exception {
+        WebSocketSession senderSession = authenticatedSession("42");
+        when(chatMessageService.sweepUndeliveredForRecipient("99"))
+                .thenReturn(List.of(new PendingDeliveryNotification("m-1", "42")));
+
+        // "99" reconnecting is what triggers the sweep — authenticatedSession
+        // itself performs the authenticate() call under test.
+        authenticatedSession("99");
+
+        ArgumentCaptor<TextMessage> senderCaptor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(senderSession).sendMessage(senderCaptor.capture());
+        TickAck ack = objectMapper.readValue(senderCaptor.getValue().getPayload(), TickAck.class);
+        assertThat(ack).isEqualTo(TickAck.doubleTick("m-1"));
+    }
+
+    @Test
+    void authenticate_withPendingUndeliveredMessages_originalSenderNotConnected_doesNotThrow() throws Exception {
+        // "42" (the original sender) is deliberately never authenticated -
+        // simulates them being offline when "99" (the recipient) reconnects.
+        when(chatMessageService.sweepUndeliveredForRecipient("99"))
+                .thenReturn(List.of(new PendingDeliveryNotification("m-1", "42")));
+
+        WebSocketSession recipientSession = authenticatedSession("99");
+
+        // No try/catch here on purpose: an unconnected original sender must
+        // not affect the reconnecting recipient's own session in any way.
+        verify(recipientSession, never()).sendMessage(any());
+        verify(recipientSession, never()).close(any());
+    }
+
+    @Test
+    void authenticate_withNoPendingUndeliveredMessages_doesNotSendAnythingExtra() throws Exception {
+        // Relies on setUp()'s default lenient stub (empty list) - the
+        // ordinary case for the overwhelming majority of connects.
+        WebSocketSession recipientSession = authenticatedSession("99");
+
+        verify(chatMessageService).sweepUndeliveredForRecipient("99");
+        verify(recipientSession, never()).sendMessage(any());
     }
 }

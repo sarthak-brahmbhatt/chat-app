@@ -31,9 +31,19 @@ public class ChatMessagePublisher {
 
     private static final Logger log = LoggerFactory.getLogger(ChatMessagePublisher.class);
 
-    private final KafkaTemplate<String, ChatMessageEvent> kafkaTemplate;
+    // Widened from KafkaTemplate<String, ChatMessageEvent>: this producer
+    // now sends TWO event kinds to the same topic (ChatMessageEvent and
+    // MessageDeliveredEvent, see ChatTopicEvent) so the delivery-ordering
+    // fix in publishDelivered can share a partition key with the original
+    // message. Spring Boot's auto-configured KafkaTemplate bean resolves
+    // here regardless of the declared generic (no new @Bean needed); no
+    // spring.json.value.default.type is configured, so JsonDeserializer on
+    // the consumer side already resolves each record's concrete type from
+    // JsonSerializer's own __TypeId__ header - the standard Spring Kafka
+    // mechanism for a multi-type topic, not new configuration surface.
+    private final KafkaTemplate<String, ChatTopicEvent> kafkaTemplate;
 
-    public ChatMessagePublisher(KafkaTemplate<String, ChatMessageEvent> kafkaTemplate) {
+    public ChatMessagePublisher(KafkaTemplate<String, ChatTopicEvent> kafkaTemplate) {
         this.kafkaTemplate = kafkaTemplate;
     }
 
@@ -63,6 +73,40 @@ public class ChatMessagePublisher {
             // never be put at risk by Kafka being slow, unreachable, or
             // otherwise misbehaving.
             log.warn("Failed to publish message {} to Kafka: {}", request.messageId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Publishes a MessageDeliveredEvent for messageId, keyed by the SAME
+     * conversationKey(senderId, recipientId) as the original ChatMessageEvent
+     * for this message — the entire mechanism behind CLAUDE.md 4's
+     * delivery-ordering fix. Kafka guarantees ordering only within one
+     * partition; using the identical key guarantees this event lands on the
+     * SAME partition the original message did, and a delivered_ack can only
+     * ever be produced after the message it acknowledges was already
+     * produced — so ChatMessageConsumer is structurally guaranteed to
+     * process the insert before this delivery event, every time, not just
+     * usually. Called from ChatWebSocketHandler.handleDeliveredAck; same
+     * non-blocking, exception-swallowing shape as publish() above, for the
+     * same reason — a Kafka hiccup here must never propagate back into the
+     * live delivered_ack handling path.
+     */
+    public void publishDelivered(String senderId, String recipientId, String messageId) {
+        try {
+            String key = conversationKey(senderId, recipientId);
+            MessageDeliveredEvent event = new MessageDeliveredEvent(messageId);
+
+            kafkaTemplate.send(KafkaTopicConfig.CHAT_MESSAGES_TOPIC, key, event)
+                    .whenComplete((result, exception) -> {
+                        if (exception != null) {
+                            log.warn("Failed to publish delivery for message {} to Kafka: {}", messageId, exception.getMessage());
+                        } else {
+                            log.debug("Published delivery for message {} to partition {}",
+                                    messageId, result.getRecordMetadata().partition());
+                        }
+                    });
+        } catch (RuntimeException e) {
+            log.warn("Failed to publish delivery for message {} to Kafka: {}", messageId, e.getMessage());
         }
     }
 

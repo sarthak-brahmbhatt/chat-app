@@ -28,7 +28,7 @@ import static org.mockito.Mockito.when;
 class ChatMessagePublisherTest {
 
     @Mock
-    private KafkaTemplate<String, ChatMessageEvent> kafkaTemplate;
+    private KafkaTemplate<String, ChatTopicEvent> kafkaTemplate;
 
     private ChatMessageRequest request(String messageId, String recipientId, String content) {
         return new ChatMessageRequest("message", messageId, recipientId, content);
@@ -100,5 +100,39 @@ class ChatMessagePublisherTest {
         // thrown back to the caller. If publish() let this propagate, this
         // test method itself would fail with an unexpected exception.
         publisher.publish("42", request("m-3", "99", "hello"));
+    }
+
+    @Test
+    void publishDelivered_sendsMessageDeliveredEventToSameConversationKeyAsOriginalMessage() {
+        lenient().when(kafkaTemplate.send(anyString(), anyString(), any())).thenReturn(new CompletableFuture<>());
+        ChatMessagePublisher publisher = new ChatMessagePublisher(kafkaTemplate);
+
+        publisher.publishDelivered("42", "99", "m-1");
+
+        ArgumentCaptor<ChatTopicEvent> eventCaptor = ArgumentCaptor.forClass(ChatTopicEvent.class);
+        // "42:99" is the exact same conversationKey a ChatMessageEvent for
+        // this pair would use (see conversationKey_isTheSameRegardlessOfWhoIsSenderOrRecipient)
+        // - that's the entire mechanism this method exists to uphold.
+        verify(kafkaTemplate).send(eq(KafkaTopicConfig.CHAT_MESSAGES_TOPIC), eq("42:99"), eventCaptor.capture());
+        assertThat(eventCaptor.getValue()).isEqualTo(new MessageDeliveredEvent("m-1"));
+    }
+
+    @Test
+    @Timeout(2)
+    void publishDelivered_neverBlocksEvenWhenKafkaNeverResponds() {
+        when(kafkaTemplate.send(anyString(), anyString(), any())).thenReturn(new CompletableFuture<>());
+        ChatMessagePublisher publisher = new ChatMessagePublisher(kafkaTemplate);
+
+        publisher.publishDelivered("42", "99", "m-2");
+        // Reaching this line at all is the assertion — publishDelivered() returned.
+    }
+
+    @Test
+    void publishDelivered_swallowsASynchronousKafkaException() {
+        when(kafkaTemplate.send(anyString(), anyString(), any()))
+                .thenThrow(new RuntimeException("simulated Kafka producer failure"));
+        ChatMessagePublisher publisher = new ChatMessagePublisher(kafkaTemplate);
+
+        publisher.publishDelivered("42", "99", "m-3");
     }
 }

@@ -83,14 +83,26 @@ rather than pure production-necessity (called out where relevant).
     existing bearer-token trust model for an internal-only tool (3.3). Revisit
     if this protocol is ever exposed to less-trusted clients.
   - **If the original sender has disconnected by the time a `delivered_ack`
-    arrives**, the double-tick is silently dropped — there is no live
-    connection left to deliver it over, and this is not a new gap: with no
-    offline-message-queue (explicitly out of scope, section 5), double tick
-    was already only ever meaningful for a sender who's still connected to
-    receive it. If the recipient hadn't been connected at delivery time
-    either, the message was never delivered live in the first place, so
-    there'd have been nothing to double-tick regardless of whether the
-    sender stuck around.
+    arrives**, the LIVE double-tick is silently dropped — there is no live
+    connection left to deliver it over, and this was never solvable without
+    a whole offline-message-queue (see §5's precisely-scoped bullet on what's
+    still not built there). What changed (message-history feature, §4): the
+    *persisted* delivery status no longer depends on the sender sticking
+    around at all — `delivered_ack` publishes a `MessageDeliveredEvent` to
+    Kafka (§4) regardless, so whenever the sender's connection next opens
+    that conversation, history already shows it correctly, even though they
+    never saw a live tick change for it.
+  - **If the RECIPIENT was never connected at all when the message was
+    sent** (so no `incoming_message` was ever delivered live, and therefore
+    no `delivered_ack` was ever produced by anything), this used to be a
+    permanent gap — nothing would ever mark that message delivered, not
+    even the recipient later opening the conversation, since reading
+    history is a pure read (§4). **Closed (message-history feature, §4):**
+    `ChatWebSocketHandler.authenticate()` sweeps every message where the
+    just-connected user is the recipient and delivery was never recorded,
+    marks each delivered, and live-notifies the original sender if they
+    happen to be connected right now — see §4's `sweepUndeliveredForRecipient`
+    entry for the full design and its accepted concurrency tradeoff.
 
 ### 3.2 Service boundaries
 - **User service** (stateless, HTTP): Register, Login, List Users. Originally
@@ -585,24 +597,54 @@ discussion that weren't written down anywhere else yet.
     the CloudFront domain, the custom domain) — kept as its own, narrowly
     scoped mapping rather than a blanket `/**` rule, since this is the first
     time chat-service has needed plain-HTTP CORS at all.
-  - **Delivered-flag persistence race (accepted, not retried)**: double-tick
-    status is written to messagedb via a `markDelivered` bulk `UPDATE`,
-    called the instant the live double-tick fires (`ChatWebSocketHandler.
-    handleDeliveredAck`). Because Kafka's publish-then-async-consume path
-    (3.4) is slower than the delivered_ack's direct socket round trip, this
-    `UPDATE` routinely — confirmed empirically during this feature's own
-    manual verification, not just a theoretical corner case — finds the
-    message's row not yet written, and matches zero rows. When that happens
-    the update is silently dropped, not retried or queued: the *live*
-    double-tick the sender's screen shows in that moment is unaffected (that
-    path never touches the database), but a *later* history fetch can
-    correctly show that same message as still single-tick, even though it
-    really was delivered live moments earlier. Expect this on nearly any
-    fast/local exchange, not just as a rare corner case. Consistent with
-    3.4's existing accepted-tradeoff posture on Kafka timing rather than a
-    new, inconsistent standard just for this one field; a retry or a
-    pending-acks table to close this gap is real, unrequested scope beyond
-    what this pass asked for.
+  - **Delivered-flag persistence — Kafka-ordered, not a synchronous race
+    (revised).** Originally, double-tick status was written via a direct
+    synchronous `markDelivered` `UPDATE`, called the instant the live
+    double-tick fired. Because Kafka's publish-then-async-consume insert
+    path (3.4) is slower than that direct socket-triggered `UPDATE`, the
+    `UPDATE` routinely — confirmed empirically, not a theoretical corner
+    case — ran before the message's own row existed yet, matched zero rows,
+    and was silently dropped, leaving history stuck showing single-tick for
+    a message that really was delivered live moments earlier. **This is now
+    fixed structurally, not mitigated:** `handleDeliveredAck` no longer runs
+    a direct `UPDATE` at all. It instead publishes a `MessageDeliveredEvent`
+    to the SAME Kafka topic and, critically, the SAME partition key
+    (`conversationKey(senderId, recipientId)`) as the original message's
+    `ChatMessageEvent`. Kafka only guarantees ordering within one partition
+    — but a `delivered_ack` can only ever be produced after the message it
+    acknowledges was already produced (there's nothing to acknowledge
+    otherwise), so same-partition placement guarantees `ChatMessageConsumer`
+    always processes the insert before the delivery update, every time, not
+    "usually." The live double-tick itself (`sendDoubleTickIfConnected`)
+    stays entirely synchronous and immediate, unaffected by any of this —
+    same "don't couple a live confirmation to how fast the durable write
+    lands" reasoning 3.4 already uses for single-tick vs. Kafka insert.
+  - **Reconnect-time delivery sweep** (`ChatMessageService.
+    sweepUndeliveredForRecipient`, called from `ChatWebSocketHandler.
+    authenticate()` on every successful WebSocket auth, not just first-time
+    connects): closes the one gap Kafka-ordering above can't reach on its
+    own — a message sent while the recipient had NO live connection at all,
+    so no `delivered_ack` was ever produced, Kafka-ordered or otherwise (see
+    3.1's now-split disconnected-sender/disconnected-recipient bullets).
+    Queries every `delivered=false` row where the just-connected user is the
+    recipient, marks each delivered, and live-double-ticks each original
+    sender if they happen to be connected right now — reusing the same
+    `sendDoubleTickIfConnected` helper `handleDeliveredAck` uses. Runs
+    unconditionally on every connect (the query is a cheap no-op when
+    nothing's pending, which is the overwhelmingly common case) and
+    deliberately never re-sends message CONTENT to the reconnecting
+    recipient — `GET /conversations/{otherUserId}/messages`, already called
+    by the frontend before this connection opens, remains the only content
+    path; re-pushing as `incoming_message` here would risk a duplicate
+    bubble. Also incidentally catches any row left stuck `false` from before
+    this whole fix shipped, since marking an already-delivered row delivered
+    again is a harmless no-op. **Accepted concurrency tradeoff, not locked
+    against**: two near-simultaneous connects for the same recipient (two
+    tabs, or a stale session's close racing a fresh one) could both sweep
+    the same rows and both fire a duplicate live double-tick — harmless,
+    since `TickAck.doubleTick` is idempotent on the frontend (a keyed
+    `.map`, not an append) and a duplicate `UPDATE` is a no-op, consistent
+    with `ConnectionRegistry`'s own no-locking, single-instance design.
 
 ## 5. Explicitly out of scope for now
 
@@ -612,6 +654,15 @@ discussion that weren't written down anywhere else yet.
 - Detailed HA/DR design
 - Multi-instance registry + pub/sub implementation (only needed once single-instance
   capacity is proven insufficient)
+- Offline message CONTENT re-delivery / a full offline-message queue — the
+  reconnect-time delivery sweep (§4) closes the DELIVERY-STATUS gap (a
+  reconnecting recipient's pending messages get marked delivered, and the
+  original sender gets live-notified if reachable), but message CONTENT
+  itself is still only ever delivered via `GET /conversations/{otherUserId}/messages`
+  — never re-pushed live to a reconnecting recipient as a fresh
+  `incoming_message`. (This bullet corrects a previously stale
+  cross-reference: §3.1 used to cite "no offline-message-queue, explicitly
+  out of scope, section 5" while this section had no such line at all.)
 
 ## 6. Deployment plan
 
@@ -648,3 +699,8 @@ discussion that weren't written down anywhere else yet.
 14. Message history — `GET /conversations/{otherUserId}/messages` (see §4), fetched
     by ChatComponent on open before the live WebSocket connection is made, so a
     reopened chat shows its past messages instead of starting empty every time.
+15. Delivery-status correctness fix (see §3.1/§4) — closes two gaps found once
+    message history made delivery status something durably read back, not just
+    a live-only signal: the delivered_ack/Kafka-insert persistence race (fixed
+    structurally via same-partition-key Kafka ordering) and messages sent while
+    the recipient was fully offline (fixed via a reconnect-time delivery sweep).

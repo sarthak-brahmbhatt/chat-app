@@ -2,6 +2,7 @@ package com.chatapp.chatservice.service;
 
 import com.chatapp.chatservice.dto.ConversationHistoryResponse;
 import com.chatapp.chatservice.dto.ConversationMessageResponse;
+import com.chatapp.chatservice.entity.ChatMessage;
 import com.chatapp.chatservice.repository.ChatMessageRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -102,50 +103,81 @@ public class ChatMessageService {
     }
 
     /**
-     * Marks a persisted message delivered, called from
-     * ChatWebSocketHandler.handleDeliveredAck the same moment the LIVE
-     * double-tick is sent to the sender - so the database and whatever the
-     * sender's screen shows agree, from the instant delivery happens.
+     * Marks a persisted message delivered. As of the reconnect-sweep
+     * feature (CLAUDE.md 3.1/4), this is called from exactly one place:
+     * sweepUndeliveredForRecipient below. It is NOT called from the live
+     * delivered_ack path anymore - that path now publishes a
+     * MessageDeliveredEvent to Kafka on the SAME partition key as the
+     * original message instead (ChatWebSocketHandler.handleDeliveredAck,
+     * ChatMessagePublisher.publishDelivered), and ChatMessageConsumer calls
+     * ChatMessageRepository.markDelivered directly once that event is
+     * consumed - Kafka's per-partition ordering guarantee makes that
+     * consumer call always run after the row already exists, structurally,
+     * not just usually.
      *
-     * A REAL, accepted race, documented rather than silently possible to
-     * hit and only discover later: Kafka's publish (on send) and consume
-     * (the actual DB write, done asynchronously by ChatMessageConsumer) sit
-     * between "message sent" and "row exists in messagedb" - CLAUDE.md 3.4's
-     * whole reason for that async design. A delivered_ack, by contrast, only
-     * has to travel: sender -> chat-service -> recipient's live socket ->
-     * recipient's client -> back to chat-service - no Kafka hop at all, and
-     * typically faster than Kafka's own produce-then-consume round trip.
-     * So it's entirely possible - confirmed empirically during this
-     * feature's own manual verification, not just a theoretical corner case
-     * - for a delivered_ack to arrive at chat-service BEFORE the row it
-     * refers to has been written yet, in which case this UPDATE matches
-     * zero rows - there's nothing yet to mark. On a local/low-latency setup
-     * this was observed to be the TYPICAL outcome for a promptly-acking
-     * recipient, not a rare one: the delivered_ack's path (sender ->
-     * chat-service -> recipient's live socket -> recipient's client -> back
-     * to chat-service, no Kafka hop) routinely wins the race against
-     * Kafka's own produce-then-consume round trip. When that happens, the
-     * delivery is NOT retried or queued: the LIVE double-tick the sender's
-     * screen shows in that moment is still entirely correct (that path
-     * never touches the database at all - see
-     * ChatWebSocketHandler.handleDeliveredAck), but a LATER read of
-     * persisted history (GET /conversations/{otherUserId}/messages) can
-     * show that same message as still single-tick, for a message that
-     * really was delivered live moments earlier - expect this, not just as
-     * an edge case, whenever history is fetched shortly after a fast
-     * exchange. Consistent with this project's existing accepted-tradeoff
-     * posture on Kafka timing (CLAUDE.md 3.4's own "if the publish to Kafka
-     * fails outright... that message is not retried or persisted
-     * anywhere") rather than a new, inconsistent standard just for this one
-     * field - building a retry or a pending-acks table to close this gap
-     * would be real, unrequested scope beyond what this pass asked for.
+     * Because of that, a zero-rows result HERE is a much rarer, different
+     * situation than it used to be: this method only ever runs against rows
+     * sweepUndeliveredForRecipient just SELECTed as delivered=false moments
+     * earlier, in the same request. A concurrent duplicate sweep (two tabs
+     * reconnecting for the same recipient near-simultaneously) is the only
+     * realistic way this UPDATE could still find nothing to do - see
+     * sweepUndeliveredForRecipient's own comment for why that's accepted,
+     * not locked against.
      */
     public void markDelivered(String messageId) {
         int rowsUpdated = chatMessageRepository.markDelivered(messageId);
         if (rowsUpdated == 0) {
-            log.info("markDelivered found no row yet for message {} - Kafka hasn't persisted it yet, "
-                    + "routinely the case for a fast delivered_ack, not a rare one "
-                    + "(see this method's Javadoc for why that's an accepted, not-retried race)", messageId);
+            log.info("markDelivered found no row for message {} - likely a concurrent duplicate sweep "
+                    + "for the same recipient (see this method's Javadoc)", messageId);
         }
+    }
+
+    /**
+     * Called from ChatWebSocketHandler.authenticate() every time a user's
+     * WebSocket connects - including reconnects, not just first-ever
+     * connects. Finds every message where this user is the RECIPIENT and
+     * delivery was never recorded, marks each delivered, and returns what
+     * the caller needs to live-notify each original sender (see
+     * PendingDeliveryNotification).
+     *
+     * This exists to close the one gap Kafka-ordering (see markDelivered's
+     * Javadoc) can't reach on its own: a message sent while this recipient
+     * had NO live connection at all. deliverIfRecipientConnected never sent
+     * incoming_message for it, so the recipient's client never had anything
+     * to auto-ack (chat.service.ts's delivered_ack trigger fires only off a
+     * live incoming_message) - no delivered_ack was ever produced, Kafka-ordered
+     * or otherwise, so nothing would ever mark that row delivered without
+     * this sweep. A broad "any delivered=false row for this recipient" query
+     * also incidentally catches any row stuck false from BEFORE this whole
+     * fix shipped - harmless, since marking an already-delivered row
+     * delivered again is a no-op.
+     *
+     * Deliberately does NOT re-send message CONTENT to this (the
+     * recipient's) session - GET /conversations/{otherUserId}/messages,
+     * already called by the frontend before this connection even opens
+     * (ChatComponent.ngOnInit), remains the only path that delivers content.
+     * Re-pushing as incoming_message here would risk a duplicate bubble
+     * (chat.service.ts's incomingMessages$ handler appends unconditionally).
+     *
+     * Concurrency, accepted not solved: two near-simultaneous connects for
+     * the same recipient (two tabs, or a stale session's close racing a
+     * fresh one) could both see the same rows here and both mark-delivered
+     * + notify twice. Harmless - TickAck.doubleTick is idempotent on the
+     * frontend (a keyed map, not an append), and marking an already-true row
+     * true again is a no-op - so no locking is added, consistent with
+     * ConnectionRegistry's own no-locking, single-instance design.
+     */
+    public List<PendingDeliveryNotification> sweepUndeliveredForRecipient(String recipientId) {
+        List<ChatMessage> undelivered = chatMessageRepository.findByRecipientIdAndDeliveredFalse(recipientId);
+        if (undelivered.isEmpty()) {
+            return List.of();
+        }
+
+        List<PendingDeliveryNotification> notifications = new ArrayList<>();
+        for (ChatMessage message : undelivered) {
+            markDelivered(message.getMessageId());
+            notifications.add(new PendingDeliveryNotification(message.getMessageId(), message.getSenderId()));
+        }
+        return notifications;
     }
 }

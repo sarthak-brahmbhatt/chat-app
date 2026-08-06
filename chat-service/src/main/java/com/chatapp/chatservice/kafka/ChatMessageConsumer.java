@@ -44,8 +44,40 @@ public class ChatMessageConsumer {
         this.chatMessageRepository = chatMessageRepository;
     }
 
+    /**
+     * Dispatches on the two ChatTopicEvent kinds (see that interface's
+     * class comment for why both share this one topic/consumer rather than
+     * living on separate topics) — a ChatMessageEvent persists a new
+     * message, a MessageDeliveredEvent marks one already-persisted. Because
+     * ChatMessagePublisher.publishDelivered keys a delivery event with the
+     * SAME conversationKey as the message it acknowledges, Kafka's
+     * per-partition ordering guarantees this method always sees the
+     * ChatMessageEvent for a given messageId before it can ever see the
+     * corresponding MessageDeliveredEvent — there is no code here enforcing
+     * that ordering; it falls out entirely from both events landing on the
+     * same partition, in production order.
+     */
     @KafkaListener(topics = KafkaTopicConfig.CHAT_MESSAGES_TOPIC, groupId = "${spring.kafka.consumer.group-id}")
-    public void consume(ChatMessageEvent event) {
+    public void consume(ChatTopicEvent event) {
+        switch (event) {
+            case ChatMessageEvent sent -> persistNewMessage(sent);
+            case MessageDeliveredEvent delivered -> applyDelivered(delivered);
+        }
+    }
+
+    private void applyDelivered(MessageDeliveredEvent delivered) {
+        int rowsUpdated = chatMessageRepository.markDelivered(delivered.messageId());
+        if (rowsUpdated == 0) {
+            // Should not happen given the same-partition-key ordering
+            // guarantee (see consume()'s Javadoc) — logged as a warning,
+            // not silently swallowed, since it would indicate that
+            // guarantee was somehow violated (e.g. a topic repartition
+            // changing the key->partition mapping between the two events).
+            log.warn("markDelivered found no row for message {} despite ordering guarantee - investigate", delivered.messageId());
+        }
+    }
+
+    private void persistNewMessage(ChatMessageEvent event) {
         // Kafka's default delivery guarantee is "at least once," not
         // "exactly once" — a consumer can see the same record again after,
         // for example, a restart that re-reads a not-yet-committed offset.

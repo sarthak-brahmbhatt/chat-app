@@ -60,4 +60,28 @@ class ChatMessageConsumerTest {
 
         verify(chatMessageRepository, never()).save(org.mockito.ArgumentMatchers.any());
     }
+
+    @Test
+    void consume_withMessageDeliveredEvent_marksMessageDelivered() {
+        ChatMessageConsumer consumer = new ChatMessageConsumer(chatMessageRepository);
+        when(chatMessageRepository.markDelivered("m-1")).thenReturn(1);
+
+        consumer.consume(new MessageDeliveredEvent("m-1"));
+
+        verify(chatMessageRepository).markDelivered("m-1");
+        verify(chatMessageRepository, never()).save(org.mockito.ArgumentMatchers.any());
+        verify(chatMessageRepository, never()).existsByMessageId(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void consume_withMessageDeliveredEventMatchingNoRow_logsButDoesNotThrow() {
+        // Should not happen given the same-partition-key ordering
+        // guarantee - but the code shouldn't blow up if it somehow did.
+        ChatMessageConsumer consumer = new ChatMessageConsumer(chatMessageRepository);
+        when(chatMessageRepository.markDelivered("m-1")).thenReturn(0);
+
+        consumer.consume(new MessageDeliveredEvent("m-1"));
+
+        verify(chatMessageRepository).markDelivered("m-1");
+    }
 }
