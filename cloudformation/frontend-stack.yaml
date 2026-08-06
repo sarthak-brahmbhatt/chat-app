@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   chat-app frontend (CLAUDE.md 3.8): private S3 bucket + CloudFront (Origin
-  Access Control, no public bucket policy), CloudFront's own default
-  domain/cert (no custom domain here). Deliberately separate from
-  chat-app-stack.yaml - see the comment block below for why, and for an
-  unsolved TODO on wiring the real backend URL into the Angular build.
+  Access Control, no public bucket policy), now aliased to
+  sarthak-chat-app.beer + www.sarthak-chat-app.beer via a us-east-1 ACM
+  cert. Deliberately separate from chat-app-stack.yaml - see the comment
+  block below for why.
 
 # =============================================================================
 # Why this is a SEPARATE stack from chat-app-stack.yaml (the backend): that
@@ -15,22 +15,40 @@ Description: >-
 # left running, updated in place by the GitHub Actions workflow on every
 # merge rather than torn down and recreated alongside the backend.
 #
-# RESOLVED (was a TODO here): Angular's production build now targets the
-# real backend via frontend/src/environments/environment.production.ts,
-# swapped in by angular.json's fileReplacements. It points at
-# api.sarthak-chat-app.beer (https for the API, wss for chat-service) -
-# the custom subdomain from CLAUDE.md 3.8, which is required rather than
-# cosmetic: the ALB presents an ACM cert for that name, and CloudFront
-# serves this app over HTTPS so a browser would block both a cert mismatch
-# and any plain-http call.
+# RESOLVED (was a TODO here): Angular's production build targets the real
+# backend via frontend/src/environments/environment.production.ts, swapped
+# in by angular.json's fileReplacements. It points at
+# api.sarthak-chat-app.beer (https for the API, wss for chat-service).
 #
-# Still outstanding, separate from this stack: the ROOT domain
-# (sarthak-chat-app.beer) is not yet pointed at this CloudFront
-# distribution - it currently resolves to Porkbun's parking IPs, so the
-# live frontend is reachable only at the *.cloudfront.net domain below.
-# Both origins are already allow-listed in the backends' CORS config, so
-# pointing the root record at CloudFront needs no backend redeploy.
+# RESOLVED (was a second TODO here): the distribution now presents
+# sarthak-chat-app.beer and www.sarthak-chat-app.beer as Aliases, backed by
+# a us-east-1 ACM cert covering both names as SANs on one certificate (see
+# the AcmCertificateArn parameter below - a DIFFERENT certificate from
+# chat-app-stack.yaml's own AcmCertificateArn parameter, which covers only
+# api.sarthak-chat-app.beer for the ALB; CloudFront and the ALB each
+# terminate TLS independently and can't share one cert resource).
+#
+# STILL OUTSTANDING, and outside what CloudFormation can do: this stack
+# only configures the AWS side. Porkbun's DNS - the ALIAS record on the
+# root domain and the CNAME record on www, both currently pointed at
+# Porkbun's own parking target (pixie.porkbun.com) - has to be repointed
+# at this distribution's domain name (this stack's CloudFrontDomainName
+# output) separately, by hand, in Porkbun's dashboard. Nothing in this
+# repo can make that change; ownership of the DNS zone stays with Porkbun.
 # =============================================================================
+
+Parameters:
+
+  AcmCertificateArn:
+    Type: String
+    Default: arn:aws:acm:us-east-1:786566430552:certificate/caf0ea5c-6352-476e-9c4a-e2cb217446c1
+    Description: >-
+      us-east-1 ACM certificate covering sarthak-chat-app.beer and
+      www.sarthak-chat-app.beer as SANs on one certificate (CLAUDE.md 3.8).
+      CloudFront requires a us-east-1 cert regardless of which region the
+      rest of the stack is in - the same hard constraint chat-app-stack.yaml
+      already documents for the ALB's cert, restated here because this is
+      a genuinely SEPARATE certificate resource, not a shared one.
 
 Resources:
 
@@ -91,14 +109,13 @@ Resources:
         SigningProtocol: sigv4
 
   # ---------------------------------------------------------------------------
-  # CLOUDFRONT DISTRIBUTION - no custom domain/ACM cert (per this task's
-  # explicit scope): ViewerCertificate below uses CloudFrontDefaultCertificate,
-  # which is what puts this site on CloudFront's own *.cloudfront.net domain
-  # with a free, automatically-managed certificate - HTTPS still works, just
-  # not under sarthak-chat-app.beer yet. Pointing the real domain here (and
-  # requesting the ACM cert CLAUDE.md 3.8 already has for the backend's
-  # subdomain, or a separate one for the root domain) is a later step once
-  # this is confirmed working, not part of this template.
+  # CLOUDFRONT DISTRIBUTION - now aliased to the real domain. The
+  # distribution's own *.cloudfront.net domain (this stack's
+  # CloudFrontDomainName output) keeps working regardless - Aliases ADDS
+  # names CloudFront will accept, it doesn't remove the default one - which
+  # is exactly why the GitHub Actions deploy workflow's invalidation step
+  # and this stack's own S3BucketName/CloudFrontDistributionId outputs
+  # needed no changes for this.
   # ---------------------------------------------------------------------------
 
   FrontendDistribution:
@@ -108,6 +125,14 @@ Resources:
         Enabled: true
         DefaultRootObject: index.html
         HttpVersion: http2
+        # Both names the ACM certificate above covers as SANs. CloudFront
+        # requires every value listed here to appear as a SAN on whatever
+        # certificate ViewerCertificate references below - listing a name
+        # here that the cert doesn't cover fails stack creation outright,
+        # not silently.
+        Aliases:
+          - sarthak-chat-app.beer
+          - www.sarthak-chat-app.beer
         # Cheapest price class - only US/Canada/Europe edge locations. A
         # reasonable default for a project whose whole AWS posture is
         # minimizing fixed/ongoing cost (same reasoning as skipping the
@@ -165,7 +190,20 @@ Resources:
             ResponseCode: 200
             ResponsePagePath: /index.html
         ViewerCertificate:
-          CloudFrontDefaultCertificate: true
+          AcmCertificateArn: !Ref AcmCertificateArn
+          # sni-only, not the legacy `vip` option: vip provisions a
+          # dedicated IP per distribution specifically for pre-SNI clients
+          # (effectively nothing left in real traffic today) and CloudFront
+          # bills for it; every modern browser supports SNI, so there's no
+          # reason to pay for that. Same reasoning already applied to the
+          # ALB's own TLS choice in chat-app-stack.yaml.
+          SslSupportMethod: sni-only
+          # CloudFront's own name for the same TLS 1.2-minimum security
+          # baseline chat-app-stack.yaml's ALB listener uses
+          # (ELBSecurityPolicy-TLS13-1-2-2021-06) - the two services name
+          # their policies differently, but both land on: TLS 1.2 minimum,
+          # no legacy protocol versions accepted.
+          MinimumProtocolVersion: TLSv1.2_2021
 
   # ---------------------------------------------------------------------------
   # BUCKET POLICY - the other half of OAC: grants CloudFront's service
