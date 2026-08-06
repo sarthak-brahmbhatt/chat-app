@@ -19,5 +19,9 @@
 export const environment = {
   production: false,
   userServiceBaseUrl: 'http://localhost:8081',
+  // Message history (GET /conversations/{id}/messages) - same host/port
+  // as the WebSocket URL below, since both are chat-service, just two
+  // different protocols on the one container.
+  chatServiceBaseUrl: 'http://localhost:8082',
   chatServiceWsUrl: 'ws://localhost:8082/ws/chat',
 };

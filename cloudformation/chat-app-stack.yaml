@@ -1158,6 +1158,36 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref ChatServiceTargetGroup
 
+  # Message history (GET /conversations/{otherUserId}/messages) is
+  # chat-service's own REST endpoint (ConversationController), NOT
+  # user-service's — but it doesn't match /ws/* above, so without this
+  # rule it would silently fall through to HttpsListener's DEFAULT action
+  # and get routed to user-service instead, which has no such route at
+  # all (a 404, not an auth error - easy to misdiagnose as "the frontend
+  # is calling the wrong thing" when the real cause is "the ALB is").
+  # Caught at template-review time, before ever deploying this, by
+  # tracing exactly what HttpsListener's default action actually covers.
+  # A second explicit rule, not a change to the existing one: /ws/* and
+  # /conversations/* are two independent path prefixes both needing to
+  # reach the SAME target group, not one pattern that could cover both.
+  ChatServiceConversationsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      # A different priority from ChatServiceListenerRule's 10 - ALB rule
+      # priorities must be unique per listener, evaluated lowest-number
+      # first. 20, not 11, leaves round-number gaps for whatever routing
+      # need shows up next, rather than packing rules in tight sequence
+      # with no room between them.
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /conversations/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ChatServiceTargetGroup
+
 Outputs:
 
   AlbDnsName:

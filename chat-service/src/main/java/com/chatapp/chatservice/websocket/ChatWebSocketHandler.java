@@ -6,6 +6,7 @@ import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
 import com.chatapp.chatservice.kafka.ChatMessagePublisher;
 import com.chatapp.chatservice.security.JwtValidator;
+import com.chatapp.chatservice.service.ChatMessageService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.jsonwebtoken.Claims;
@@ -70,16 +71,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final ConnectionRegistry connectionRegistry;
     private final ObjectMapper objectMapper;
     private final ChatMessagePublisher chatMessagePublisher;
+    private final ChatMessageService chatMessageService;
 
     public ChatWebSocketHandler(
             JwtValidator jwtValidator,
             ConnectionRegistry connectionRegistry,
             ObjectMapper objectMapper,
-            ChatMessagePublisher chatMessagePublisher) {
+            ChatMessagePublisher chatMessagePublisher,
+            ChatMessageService chatMessageService) {
         this.jwtValidator = jwtValidator;
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
         this.chatMessagePublisher = chatMessagePublisher;
+        this.chatMessageService = chatMessageService;
     }
 
     @Override
@@ -238,14 +242,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      * why that's a deliberate, accepted tradeoff rather than chat-service
      * tracking its own messageId -> senderId map).
      *
-     * If the original sender is no longer connected, the double-tick is
-     * SILENTLY DROPPED — there is no channel left to deliver it over. This
-     * isn't a new gap: with no offline-message-queue (out of scope),
-     * double-tick was already only ever meaningful for a sender who's still
-     * live to receive it — if the recipient hadn't been connected at
-     * delivery time either, the message was never delivered live in the
-     * first place (see deliverIfRecipientConnected above), so there would
-     * have been nothing to double-tick regardless.
+     * Two things happen here now, deliberately UNCONDITIONAL on each other:
+     * persisting the delivery (ChatMessageService.markDelivered) always
+     * runs, regardless of whether the live double-tick below succeeds — a
+     * message history read later must show this message as delivered even
+     * if the sender had ALREADY disconnected by the time this ack arrived
+     * (see the next paragraph), so persistence can't be conditioned on the
+     * live-delivery branch succeeding.
+     *
+     * If the original sender is no longer connected, the LIVE double-tick
+     * is silently dropped — there is no channel left to deliver it over.
+     * This isn't a new gap: with no offline-message-queue (out of scope),
+     * a live double-tick was already only ever meaningful for a sender
+     * who's still connected to receive it. The PERSISTED delivery status
+     * (new as of this endpoint) is different — it's written regardless of
+     * whether the sender is still around, specifically so that when the
+     * sender reopens this conversation later, history shows the message as
+     * delivered, even though they never saw a live tick change for it.
      */
     private void handleDeliveredAck(WebSocketSession session, String payload) {
         DeliveredAck ack;
@@ -261,9 +274,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
+        chatMessageService.markDelivered(ack.messageId());
+
         Optional<WebSocketSession> senderSession = connectionRegistry.find(ack.senderId());
         if (senderSession.isEmpty()) {
-            log.info("Sender {} no longer connected; double-tick for message {} dropped", ack.senderId(), ack.messageId());
+            log.info("Sender {} no longer connected; live double-tick for message {} dropped (delivery was still persisted)",
+                    ack.senderId(), ack.messageId());
             return;
         }
 

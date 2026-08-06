@@ -19,4 +19,5 @@
 import { environment } from '../../environments/environment';
 
 export const USER_SERVICE_BASE_URL = environment.userServiceBaseUrl;
+export const CHAT_SERVICE_BASE_URL = environment.chatServiceBaseUrl;
 export const CHAT_SERVICE_WS_URL = environment.chatServiceWsUrl;

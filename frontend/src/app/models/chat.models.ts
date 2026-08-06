@@ -53,3 +53,30 @@ export interface DeliveredAck {
 
 /** A discriminated union of everything the server can send after auth succeeds. */
 export type ServerChatEvent = TickAck | IncomingChatMessage;
+
+/**
+ * One message from GET /conversations/{otherUserId}/messages
+ * (ConversationMessageResponse.java). A REST response, not a WebSocket
+ * envelope — no `type` field, unlike everything above — which is why this
+ * isn't folded into ServerChatEvent.
+ *
+ * `sentAt` arrives as an ISO-8601 string (Jackson's default Instant
+ * serialization) — kept as a string here rather than parsed into a Date,
+ * since ChatComponent only ever needs to sort/display these once already
+ * in the server's own oldest-to-newest order, never to do date arithmetic
+ * on them.
+ */
+export interface ConversationMessageResponse {
+  messageId: string;
+  senderId: string;
+  recipientId: string;
+  content: string;
+  sentAt: string;
+  delivered: boolean;
+}
+
+/** The response body for GET /conversations/{otherUserId}/messages. */
+export interface ConversationHistoryResponse {
+  messages: ConversationMessageResponse[];
+  message: string;
+}

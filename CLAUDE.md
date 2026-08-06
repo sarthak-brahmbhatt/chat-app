@@ -538,6 +538,71 @@ discussion that weren't written down anywhere else yet.
   returns single tick immediately → publishes async to Kafka for DB persistence
   → delivers live to Browser B if connected → Browser B acknowledges → Chat
   service returns double tick to Browser A.
+- `GET /conversations/{otherUserId}/messages` (JWT in header) → Chat service
+  fetches the persisted conversation between the authenticated caller and
+  `otherUserId` from messagedb, oldest-to-newest → 200 OK + a message list
+  (empty list + "No messages yet." if there's no history), or 401 on
+  missing/invalid/expired token. The Angular chat window calls this once, on
+  open, to populate history before the live WebSocket connection is made (see
+  ChatComponent.ngOnInit) — this is chat-service's first plain REST endpoint,
+  sitting alongside its existing WebSocket-only surface.
+  - **Auth: inline `JwtValidator` in the controller, not promoted to an
+    interceptor.** chat-service already has exactly one other authenticated
+    concern — the WebSocket handshake (3.3) — but that auth happens through
+    Spring's `WebSocketHandlerRegistration`/`HandshakeInterceptor` machinery,
+    a completely different mechanism from Spring MVC's `HandlerInterceptor`
+    that guards user-service's REST endpoints (3.2's `JwtAuthenticationInterceptor`).
+    A `HandlerInterceptor` here would do nothing to unify with WS auth — it
+    would only be reusable across chat-service's *other* REST endpoints, and
+    there's exactly one of those (this one). Introducing an interceptor
+    layer, a registration config, and an exclusion list to protect a single
+    endpoint would be structure built for a second REST endpoint that
+    doesn't exist yet. Revisit and promote to an interceptor the moment a
+    *second* REST endpoint is added to chat-service — at that point the
+    duplication becomes real, not hypothetical.
+  - **Limit: fixed at the most recent 50 messages, oldest-to-newest within
+    that window. No "load more" / pagination in this pass.** Selected via a
+    single `DESC ... LIMIT 50` query (`Pageable`), reversed in memory before
+    returning — the DB has to select by recency to get the *right* 50 rows,
+    even though the response itself reads oldest-first. "Load more" is a
+    real, deliberately deferred future item, not an oversight: it raises UX
+    questions (prepend-on-scroll-up vs. an explicit button, a cursor/offset
+    contract) that haven't been designed yet, and building the mechanics
+    ahead of those decisions would be guessing rather than deciding.
+  - **A conversation with an `otherUserId` that doesn't correspond to any
+    real user returns the exact same response as a real user with no shared
+    history: `{"messages": [], "message": "No messages yet."}`.** This is
+    deliberate, not an unhandled edge case: messagedb has no users table and
+    chat-service has no dependency on user-service for this endpoint (see
+    3.2's service-boundary reasoning), so there is structurally no way to
+    distinguish "this user doesn't exist" from "this user exists but you've
+    never messaged them" without adding a new cross-service call purely to
+    validate a path parameter — real, unrequested coupling this pass
+    intentionally avoids.
+  - **CORS**: a new `WebMvcConfig` (chat-service's first) scopes
+    `addCorsMappings` to `/conversations/**` specifically, allowing the same
+    origins already trusted for the WebSocket handshake (`localhost:4200`,
+    the CloudFront domain, the custom domain) — kept as its own, narrowly
+    scoped mapping rather than a blanket `/**` rule, since this is the first
+    time chat-service has needed plain-HTTP CORS at all.
+  - **Delivered-flag persistence race (accepted, not retried)**: double-tick
+    status is written to messagedb via a `markDelivered` bulk `UPDATE`,
+    called the instant the live double-tick fires (`ChatWebSocketHandler.
+    handleDeliveredAck`). Because Kafka's publish-then-async-consume path
+    (3.4) is slower than the delivered_ack's direct socket round trip, this
+    `UPDATE` routinely — confirmed empirically during this feature's own
+    manual verification, not just a theoretical corner case — finds the
+    message's row not yet written, and matches zero rows. When that happens
+    the update is silently dropped, not retried or queued: the *live*
+    double-tick the sender's screen shows in that moment is unaffected (that
+    path never touches the database), but a *later* history fetch can
+    correctly show that same message as still single-tick, even though it
+    really was delivered live moments earlier. Expect this on nearly any
+    fast/local exchange, not just as a rare corner case. Consistent with
+    3.4's existing accepted-tradeoff posture on Kafka timing rather than a
+    new, inconsistent standard just for this one field; a retry or a
+    pending-acks table to close this gap is real, unrequested scope beyond
+    what this pass asked for.
 
 ## 5. Explicitly out of scope for now
 
@@ -580,3 +645,6 @@ discussion that weren't written down anywhere else yet.
     expires (the WebSocket connection force-disconnects at that point, per step 5's
     server-enforced-expiry design — CLAUDE.md 3.3), store the newly-issued access +
     refresh token pair, then reconnect the WebSocket with the fresh access token.
+14. Message history — `GET /conversations/{otherUserId}/messages` (see §4), fetched
+    by ChatComponent on open before the live WebSocket connection is made, so a
+    reopened chat shows its past messages instead of starting empty every time.

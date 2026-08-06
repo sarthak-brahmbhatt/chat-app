@@ -7,6 +7,7 @@ import com.chatapp.chatservice.kafka.ChatMessageEvent;
 import com.chatapp.chatservice.kafka.ChatMessagePublisher;
 import com.chatapp.chatservice.kafka.KafkaTopicConfig;
 import com.chatapp.chatservice.security.JwtValidator;
+import com.chatapp.chatservice.service.ChatMessageService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
@@ -77,6 +78,14 @@ class ChatWebSocketHandlerTest {
     @Mock
     private KafkaTemplate<String, ChatMessageEvent> kafkaTemplate;
 
+    // A mock, not the real service backed by a mocked repository: this
+    // class tests ChatWebSocketHandler's OWN branching logic (does it call
+    // markDelivered at the right moment, unconditionally of live-delivery
+    // outcome) — ChatMessageServiceTest is where markDelivered's own
+    // behavior (the race documented on that method) gets exercised.
+    @Mock
+    private ChatMessageService chatMessageService;
+
     private Map<String, Object> sessionAttributes;
 
     @BeforeEach
@@ -98,7 +107,8 @@ class ChatWebSocketHandlerTest {
                 .thenReturn(new CompletableFuture<>());
 
         ChatMessagePublisher chatMessagePublisher = new ChatMessagePublisher(kafkaTemplate);
-        handler = new ChatWebSocketHandler(jwtValidator, connectionRegistry, objectMapper, chatMessagePublisher);
+        handler = new ChatWebSocketHandler(
+                jwtValidator, connectionRegistry, objectMapper, chatMessagePublisher, chatMessageService);
 
         sessionAttributes = new HashMap<>();
         // lenient(): not every test in this class uses the shared `session`
@@ -340,6 +350,10 @@ class ChatWebSocketHandlerTest {
         verify(senderSession).sendMessage(senderCaptor.capture());
         TickAck ack = objectMapper.readValue(senderCaptor.getValue().getPayload(), TickAck.class);
         assertThat(ack).isEqualTo(TickAck.doubleTick("m-1"));
+
+        // The persisted delivery flag (new: history feature) - a separate
+        // effect from the live double-tick above, verified separately.
+        verify(chatMessageService).markDelivered("m-1");
     }
 
     @Test
@@ -363,5 +377,12 @@ class ChatWebSocketHandlerTest {
         // response back to them, and definitely no close.
         verify(recipientSession, never()).sendMessage(any());
         verify(recipientSession, never()).close(any());
+
+        // The whole point of persisting delivery UNCONDITIONALLY (see
+        // handleDeliveredAck's class comment): even though there was no
+        // live sender to double-tick, the database still has to record
+        // that this message was delivered, so a later history read shows
+        // it correctly.
+        verify(chatMessageService).markDelivered("m-2");
     }
 }

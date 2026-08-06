@@ -1,8 +1,16 @@
+import { HttpClient } from '@angular/common/http';
 import { Injectable, inject, signal } from '@angular/core';
 import { Observable, Subject, filter } from 'rxjs';
-import { CHAT_SERVICE_WS_URL } from './api-config';
+import { CHAT_SERVICE_BASE_URL, CHAT_SERVICE_WS_URL } from './api-config';
 import { AuthService } from './auth.service';
-import { ChatMessageRequest, DeliveredAck, IncomingChatMessage, ServerChatEvent, TickAck } from '../models/chat.models';
+import {
+  ChatMessageRequest,
+  ConversationHistoryResponse,
+  DeliveredAck,
+  IncomingChatMessage,
+  ServerChatEvent,
+  TickAck,
+} from '../models/chat.models';
 
 /**
  * Owns one WebSocket connection to chat-service and turns its raw messages
@@ -30,6 +38,7 @@ import { ChatMessageRequest, DeliveredAck, IncomingChatMessage, ServerChatEvent,
 @Injectable({ providedIn: 'root' })
 export class ChatService {
   private readonly authService = inject(AuthService);
+  private readonly http = inject(HttpClient);
   private socket: WebSocket | null = null;
 
   private readonly eventsSubject = new Subject<ServerChatEvent>();
@@ -54,6 +63,24 @@ export class ChatService {
   // successful one is inferred by the connection simply staying open.
   readonly connectionState = signal<'connecting' | 'open' | 'closed'>('closed');
   readonly authFailed = signal(false);
+
+  /**
+   * GET /conversations/{otherUserId}/messages — the persisted history for
+   * this conversation, oldest-to-newest, exactly as chat-service returns
+   * it (CLAUDE.md 4). Deliberately a plain HttpClient call, nothing
+   * WebSocket-related — authInterceptor (app.config.ts) attaches the
+   * Bearer token to this automatically, same as every other HttpClient
+   * call in this app; ChatService doesn't need to do anything extra for
+   * auth here despite otherwise being all about the WebSocket connection.
+   *
+   * ChatComponent is responsible for calling this BEFORE connect() — see
+   * that component's ngOnInit for why that ordering (not this method) is
+   * what actually prevents a gap/duplicate at the history-to-live
+   * transition.
+   */
+  getHistory(otherUserId: string): Observable<ConversationHistoryResponse> {
+    return this.http.get<ConversationHistoryResponse>(`${CHAT_SERVICE_BASE_URL}/conversations/${otherUserId}/messages`);
+  }
 
   connect(): void {
     if (this.socket) {

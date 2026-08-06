@@ -2,7 +2,9 @@ import { Component, DestroyRef, OnDestroy, OnInit, inject, signal } from '@angul
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ActivatedRoute } from '@angular/router';
 import { filter } from 'rxjs';
+import { AuthService } from '../../core/auth.service';
 import { ChatService } from '../../core/chat.service';
+import { ConversationMessageResponse } from '../../models/chat.models';
 
 interface ChatBubble {
   messageId: string;
@@ -23,6 +25,7 @@ interface ChatBubble {
 export class ChatComponent implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   private readonly chatService = inject(ChatService);
+  private readonly authService = inject(AuthService);
   private readonly destroyRef = inject(DestroyRef);
 
   // The route param arrives as a string already — conveniently, this
@@ -34,7 +37,61 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   readonly bubbles = signal<ChatBubble[]>([]);
 
+  /**
+   * History is fetched and fully applied to `bubbles` BEFORE connect() is
+   * ever called — that ordering (not any de-duplication logic afterward)
+   * is what makes the history-to-live transition clean:
+   *
+   *   - NO GAP: if this were reversed (connect first, fetch history
+   *     second), a live message could arrive and get appended to
+   *     `bubbles` in the window before the history fetch resolves — then
+   *     seeding `bubbles` from the history response would silently
+   *     overwrite it. Fetching first means `bubbles` already holds full
+   *     history by the time anything live can possibly arrive and append
+   *     to it.
+   *   - NO DUPLICATES: a message can only ever appear in the history
+   *     response OR arrive live, never both. Live delivery
+   *     (deliverIfRecipientConnected in ChatWebSocketHandler.java) is a
+   *     one-time check against who's connected AT THE MOMENT a message is
+   *     sent — there's no replay/redelivery mechanism for a message
+   *     that's already been delivered and persisted (CLAUDE.md explicitly
+   *     has no offline-message-queue). So a message the history snapshot
+   *     already includes can never ALSO arrive over the live socket
+   *     later; the two sources are disjoint by construction, not by
+   *     anything this component has to check for.
+   */
   ngOnInit(): void {
+    const myUserId = this.authService.currentUserId();
+
+    this.chatService.getHistory(this.recipientId).subscribe({
+      next: (history) => {
+        this.bubbles.set(history.messages.map((message) => this.toBubble(message, myUserId)));
+        this.connectAndSubscribeToLiveEvents();
+      },
+      // Degrade gracefully rather than leaving the chat entirely unusable:
+      // if fetching history fails (e.g. a transient network error), the
+      // conversation still opens - just without past context - instead of
+      // a failed history load blocking live chat from working at all.
+      error: () => this.connectAndSubscribeToLiveEvents(),
+    });
+  }
+
+  private toBubble(message: ConversationMessageResponse, myUserId: string | null): ChatBubble {
+    // A persisted message was, by definition, already single-ticked before
+    // it could ever reach messagedb (handleChatMessage sends the single
+    // tick BEFORE publishing to Kafka - CLAUDE.md 3.4) - so a historical
+    // 'sent' bubble is never 'pending', only 'single' or 'double' depending
+    // on the persisted `delivered` flag.
+    const tickState = message.delivered ? 'double' : 'single';
+    return {
+      messageId: message.messageId,
+      direction: message.senderId === myUserId ? 'sent' : 'received',
+      content: message.content,
+      tickState,
+    };
+  }
+
+  private connectAndSubscribeToLiveEvents(): void {
     this.chatService.connect();
 
     // takeUntilDestroyed(this.destroyRef): automatically unsubscribes when

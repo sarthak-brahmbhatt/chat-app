@@ -14,8 +14,10 @@ import java.time.Instant;
  * A persisted chat message — one row per message in messagedb's "messages"
  * table (CLAUDE.md 3.5, build-order step 8). Written exclusively by
  * ChatMessageConsumer, asynchronously, after the fact — this entity has
- * nothing to do with the live WebSocket round trip (ChatWebSocketHandler
- * never touches this class or messagedb at all).
+ * nothing to do with the live WebSocket round trip for SENDING a message
+ * (ChatWebSocketHandler.handleChatMessage never touches this class or
+ * messagedb at all). It IS now also touched from the delivery side — see
+ * `delivered` below.
  *
  * messageId is the SAME client-generated correlation id from the WebSocket
  * protocol (CLAUDE.md 3.1) — not a coincidence, and not meant to be a
@@ -48,6 +50,21 @@ public class ChatMessage {
 
     @Column(name = "sent_at", nullable = false)
     private Instant sentAt;
+
+    // Build-order step "message history": before this, double-tick was a
+    // PURELY LIVE, in-memory concept (ChatWebSocketHandler.handleDeliveredAck
+    // just forwarded a TickAck over the socket — see that method — and never
+    // touched messagedb). That was fine as long as tick state only mattered
+    // to a client that was live and connected at the moment delivery
+    // happened. It stops being fine once history can be fetched later (this
+    // column's whole reason for existing): a message delivered five minutes
+    // ago must still SHOW as delivered when the conversation is reopened,
+    // which means delivery has to be a fact recorded in the database, not
+    // just a fact that was once true on a socket that's since closed.
+    // Defaults to false (not delivered) - matches "not yet acknowledged,"
+    // the correct initial state for a freshly-persisted message.
+    @Column(nullable = false)
+    private boolean delivered = false;
 
     protected ChatMessage() {
     }
@@ -82,5 +99,9 @@ public class ChatMessage {
 
     public Instant getSentAt() {
         return sentAt;
+    }
+
+    public boolean isDelivered() {
+        return delivered;
     }
 }

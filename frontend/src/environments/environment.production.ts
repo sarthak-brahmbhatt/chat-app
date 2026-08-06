@@ -27,9 +27,20 @@
  * The /ws/chat path is what the ALB's listener rule routes to the
  * chat-service target group (everything else falls through to
  * user-service) — see chat-app-stack.yaml's ChatServiceListenerRule.
+ *
+ * chatServiceBaseUrl (message history, GET /conversations/{id}/messages)
+ * is the SAME host as userServiceBaseUrl — both hit the one ALB, which
+ * routes by PATH, not by which "service" the frontend thinks it's
+ * calling. /conversations/* has its own explicit ALB rule
+ * (ChatServiceConversationsListenerRule) pointing at chat-service's
+ * target group, added specifically because it doesn't match /ws/* and
+ * would otherwise silently fall through to user-service's default
+ * action — a 404, not an auth error, and easy to misdiagnose as a
+ * frontend bug rather than a routing gap.
  */
 export const environment = {
   production: true,
   userServiceBaseUrl: 'https://api.sarthak-chat-app.beer',
+  chatServiceBaseUrl: 'https://api.sarthak-chat-app.beer',
   chatServiceWsUrl: 'wss://api.sarthak-chat-app.beer/ws/chat',
 };
