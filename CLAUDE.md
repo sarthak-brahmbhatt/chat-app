@@ -401,6 +401,67 @@ discussion that weren't written down anywhere else yet.
   follows directly from the EC2/ASG (not ECS/Fargate) compute choice above;
   there's no task-definition concept to use once ECS itself is out of the
   picture.
+  - **user-service's deploy-on-merge is a CloudFormation stack update, not a
+    direct `ec2:RunInstances` call** (revised after hitting this in
+    practice). The original `deploy-user-service.yml` bypassed
+    CloudFormation entirely — patched the Launch Template's UserData
+    directly via the EC2 API, then called `run-instances` /
+    `register-targets` / `deregister-targets` / `terminate-instances` by
+    hand to swap the running instance. That put two systems in charge of
+    the same resource: a later CloudFormation stack update (e.g. rotating
+    MysqlRootPassword/JwtSecret) would ALSO try to replace
+    `UserServiceInstance`, and the workflow's own hand-launched instance —
+    invisible to CloudFormation, since it was never created through it —
+    would linger as an orphan neither system cleaned up. Confirmed live,
+    not theoretical: this is exactly what produced two simultaneously
+    running, simultaneously-healthy user-service instances after a secrets
+    rotation collided with a workflow run.
+  - **The fix works because of one specific property wiring, not because
+    "a stack update" is magic.** `UserServiceInstance.Properties.LaunchTemplate.Version`
+    is `!GetAtt UserServiceLaunchTemplate.LatestVersionNumber`, not a
+    pinned number or `$Default`. Changing `UserServiceImageTag` causes
+    `Fn::Sub` to render different `LaunchTemplateData`, which creates a new
+    Launch Template VERSION (confirmed via `describe-change-set`:
+    `UserServiceLaunchTemplate [Replacement: False]` — a LaunchTemplate
+    resource is never "replaced," a new version is just added).
+    `LatestVersionNumber` changes as a result, which changes
+    `UserServiceInstance`'s own `LaunchTemplate.Version` PROPERTY within
+    the SAME update — and that property is `recreation: Always` for
+    `AWS::EC2::Instance` (also confirmed via `describe-change-set`, then
+    watched happen: `i-0bbc3604e498eefe5` → `i-02fc3a9650973b0ca` on
+    execute). Bumping which version is `$Default` would NOT have been
+    enough on its own — `$Default` only matters for launches that don't
+    pin a version explicitly, which this instance never does. It's the
+    `$Latest` wiring specifically that makes a plain parameter change
+    self-sufficient here.
+  - **`deploy-user-service.yml` now does exactly one AWS-mutating thing**:
+    fetches the live stack's current parameter keys (not hardcoded, so it
+    can't drift from the template's own Parameters section), builds a
+    parameters file setting only `UserServiceImageTag` to the new
+    short-SHA tag with `UsePreviousValue: true` for every other key, and
+    calls `cloudformation/deploy.sh deploy`. No more direct
+    `run-instances`/target-group calls, and therefore no more path for
+    this workflow to create an instance CloudFormation doesn't know about.
+    `UsePreviousValue` on every other parameter is load-bearing, not
+    boilerplate: without it, an update that only specifies
+    `UserServiceImageTag` would reset every unlisted parameter to the
+    TEMPLATE's default — silently wiping `MysqlRootPassword`/`JwtSecret`
+    back to empty, the exact failure that took the whole stack down
+    before (3.3's refresh-token secret-rotation incident).
+  - **Accepted tradeoff, not silently dropped**: the hand-built swap this
+    replaced explicitly created the new instance, verified it healthy in
+    the target group, and only then destroyed the old one —
+    zero-downtime by construction. Plain CloudFormation replacement of
+    `AWS::EC2::Instance` has no equivalent wait; there's no
+    `CreationPolicy`/`cfn-signal` wired into this template, so a bad
+    deploy can have a brief window where the old instance is already gone
+    before the new one is confirmed healthy. Revisit if that gap ever
+    actually matters in practice — not solved here, since it wasn't the
+    problem this change was fixing.
+  - **chat-service keeps its existing mechanism unchanged** — its ASG
+    Instance Refresh (`deploy-chat-service.yml`) was never the source of
+    the conflict; only user-service's bespoke, CloudFormation-bypassing
+    path was.
 - **IaC: CloudFormation**, one template capturing the full stack. Chosen
   specifically because this project's cost posture is "spin up to demo, tear
   down when not in use," not "leave running" — a single template makes
