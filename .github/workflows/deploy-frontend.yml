@@ -29,12 +29,13 @@ jobs:
         working-directory: frontend
         run: npm ci
 
-      # TODO (not solved here - see cloudformation/frontend-stack.yaml's own
-      # TODO comment): this build has no real backend API/WS URL yet.
-      # frontend/src/environments/environment.production.ts (or equivalent)
-      # needs to point at the deployed ALB - or, longer-term,
-      # api.sarthak-chat-app.beer once CLAUDE.md 3.8's DNS is wired up -
-      # before this step means anything beyond "it compiles."
+      # --configuration production triggers angular.json's fileReplacements,
+      # swapping src/environments/environment.ts for environment.production.ts
+      # so the bundle is built against https://api.sarthak-chat-app.beer and
+      # wss://api.sarthak-chat-app.beer/ws/chat rather than localhost. (This
+      # previously carried a TODO saying no real backend URL existed yet -
+      # resolved once the backend was deployed and its DNS pointed at the
+      # ALB.)
       - name: Build (production)
         working-directory: frontend
         run: npx ng build --configuration production

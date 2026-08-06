@@ -45,6 +45,14 @@ public class WebSocketConfig implements WebSocketConfigurer {
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(chatWebSocketHandler, "/ws/chat")
-                .setAllowedOrigins("http://localhost:4200");
+                // Same three origins, and the same reasoning, as
+                // user-service's WebMvcConfig.addCorsMappings — but enforced
+                // by a completely separate mechanism (this handshake-time
+                // origin check, not Spring MVC's CORS support), which is why
+                // the list has to be repeated here rather than shared.
+                .setAllowedOrigins(
+                        "http://localhost:4200",
+                        "https://d3ky4h6sqgh0ie.cloudfront.net",
+                        "https://sarthak-chat-app.beer");
     }
 }

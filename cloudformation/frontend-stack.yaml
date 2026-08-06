@@ -15,16 +15,21 @@ Description: >-
 # left running, updated in place by the GitHub Actions workflow on every
 # merge rather than torn down and recreated alongside the backend.
 #
-# TODO (deliberately NOT solved by this template - out of scope for the
-# request that produced it): Angular's production build needs the real
-# backend API/WS URL baked in via environment configuration
-# (frontend/src/environments/environment.production.ts or equivalent)
-# before `ng build --configuration production` runs. That value doesn't
-# exist yet - it depends on chat-app-stack.yaml's ALB, which only gets a
-# real DNS name once that stack is actually deployed (and, per CLAUDE.md
-# 3.8, would eventually be api.sarthak-chat-app.beer once Porkbun's DNS is
-# pointed at it, not the ALB's raw AWS domain name directly). Wiring that
-# up is follow-up work, not part of this stack.
+# RESOLVED (was a TODO here): Angular's production build now targets the
+# real backend via frontend/src/environments/environment.production.ts,
+# swapped in by angular.json's fileReplacements. It points at
+# api.sarthak-chat-app.beer (https for the API, wss for chat-service) -
+# the custom subdomain from CLAUDE.md 3.8, which is required rather than
+# cosmetic: the ALB presents an ACM cert for that name, and CloudFront
+# serves this app over HTTPS so a browser would block both a cert mismatch
+# and any plain-http call.
+#
+# Still outstanding, separate from this stack: the ROOT domain
+# (sarthak-chat-app.beer) is not yet pointed at this CloudFront
+# distribution - it currently resolves to Porkbun's parking IPs, so the
+# live frontend is reachable only at the *.cloudfront.net domain below.
+# Both origins are already allow-listed in the backends' CORS config, so
+# pointing the root record at CloudFront needs no backend redeploy.
 # =============================================================================
 
 Resources:

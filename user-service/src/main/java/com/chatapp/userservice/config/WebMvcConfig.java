@@ -70,7 +70,22 @@ public class WebMvcConfig implements WebMvcConfigurer {
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/**")
-                .allowedOrigins("http://localhost:4200")
+                .allowedOrigins(
+                        // Angular dev server (`ng serve`), unchanged.
+                        "http://localhost:4200",
+                        // The deployed frontend's CloudFront distribution
+                        // (build-order step 12) — this is the origin a real
+                        // browser actually sends today, since the root
+                        // domain isn't pointed at CloudFront yet.
+                        "https://d3ky4h6sqgh0ie.cloudfront.net",
+                        // The eventual custom domain (CLAUDE.md 3.8). Listed
+                        // ahead of the DNS change deliberately: allowing an
+                        // origin that isn't live yet is harmless (nothing can
+                        // send it), and it means pointing Porkbun's root
+                        // record at CloudFront later won't ALSO require a
+                        // backend redeploy to stop CORS from blocking every
+                        // call.
+                        "https://sarthak-chat-app.beer")
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*");
     }
