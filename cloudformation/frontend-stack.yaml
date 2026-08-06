@@ -239,9 +239,14 @@ Outputs:
 
   CloudFrontDomainName:
     Description: >-
-      The site's live URL is https://<this value>/. Also needed by the
-      GitHub Actions deploy workflow (as the invalidation target) via its
-      distribution ID, see CloudFrontDistributionId below.
+      https://<this value>/ always works. Once Porkbun's ALIAS (root) and
+      CNAME (www) records are repointed at this exact value,
+      https://sarthak-chat-app.beer and https://www.sarthak-chat-app.beer
+      resolve here too - CloudFront doesn't know or care what DNS name a
+      request arrived on, only that it's one of the Aliases configured
+      above. Also needed by the GitHub Actions deploy workflow (as the
+      invalidation target) via its distribution ID, see
+      CloudFrontDistributionId below.
     Value: !GetAtt FrontendDistribution.DomainName
 
   S3BucketName:

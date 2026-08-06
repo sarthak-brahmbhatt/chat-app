@@ -394,6 +394,29 @@ discussion that weren't written down anywhere else yet.
   TLS certificate for a real domain, not AWS's default `*.amazonaws.com` /
   ALB DNS name (which browsers would flag, and which doesn't match this
   project's own domain anyway).
+  - **A second, SEPARATE ACM certificate covers the frontend itself**:
+    `arn:aws:acm:us-east-1:786566430552:certificate/caf0ea5c-6352-476e-9c4a-e2cb217446c1`,
+    with `sarthak-chat-app.beer` and `www.sarthak-chat-app.beer` as SANs on
+    one certificate. Not the same cert as the ALB's above — CloudFront and
+    the ALB each terminate TLS independently, so each needs its own
+    certificate covering only the name(s) it actually presents; there's no
+    mechanism to share one ACM resource between the two. `frontend-stack.yaml`
+    now sets both names as CloudFront `Aliases` and wires this ARN into
+    `ViewerCertificate` (`SslSupportMethod: sni-only` — the modern,
+    free-by-default option; the legacy `vip` method provisions a dedicated
+    IP for pre-SNI clients, effectively unneeded traffic today, and
+    CloudFront bills for it).
+  - **CloudFormation only controls the AWS side of this — Porkbun's DNS
+    is a separate, manual, out-of-band step**, same reasoning as 3.3's
+    stance on IAM user creation staying a human's call: no template in
+    this repo can reach into Porkbun's zone, so the ALIAS record (root
+    domain) and CNAME record (`www`) — both currently pointed at Porkbun's
+    own parking target, `pixie.porkbun.com` — have to be repointed by hand
+    at the CloudFront distribution's domain name
+    (`frontend-stack.yaml`'s `CloudFrontDomainName` output) after every
+    time that value changes (it's stable across ordinary deploys since the
+    distribution itself isn't replaced by them, but would change if the
+    distribution ever were).
 - **Images: ECR**, pulled by EC2 instances via an **IAM instance role** — no
   stored credentials on the instances themselves, consistent with 3.3's
   general stance against hardcoding secrets. Deployment on merge is **Launch
