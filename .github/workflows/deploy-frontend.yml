@@ -21,7 +21,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # Must be >= the Angular CLI's minimum (it rejects Node 20
+          # outright: "requires a minimum Node.js version of v22.22.3
+          # or v24.15.0 or v26.0.0"). Pinned to 24 to match the
+          # version this build was actually verified against locally,
+          # rather than a floating major that could drift apart from it.
+          node-version: '24'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
