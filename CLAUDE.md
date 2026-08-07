@@ -4,6 +4,11 @@ This file is the source of truth for architecture decisions made during system d
 Read this before writing any code. Do not introduce components or patterns not listed
 here without flagging it as a new decision first.
 
+Detailed incident postmortems (what broke, root cause, fix) live in
+[`docs/incidents.md`](docs/incidents.md) — this file links to them from
+wherever a current decision exists because of one, rather than containing
+the full narrative.
+
 ## 1. Scope
 
 Internal chat tool for an organization of ~10,000 employees. Not a public/federated
@@ -229,86 +234,16 @@ rather than pure production-necessity (called out where relevant).
   which drastically lowers per-connection memory cost. This needs to be validated
   with real load testing (Artillery/k6/Gatling/Locust), not just napkin math,
   before deciding final instance sizing.
-- **Step 11 load test results — empirically validates (and partly corrects) the
-  capacity reasoning above.** Tool: **k6**, chosen over Artillery/Gatling/Locust
-  because it can script the EXACT connection lifecycle this test needs directly
-  (open a real WebSocket, send one raw-string frame as the CLAUDE.md 3.1 auth
-  handshake — no envelope — hold the connection open, observe the close code),
-  via its native `k6/ws` module, combined with a built-in stepped-ramp executor
-  (`ramping-vus`) — no YAML/processor-function workaround needed the way
-  Artillery's WebSocket engine would require. Test users were seeded through the
-  REAL `/register` + `/login` endpoints (not a DB bypass), so each simulated
-  connection carries a genuine chat-service-verifiable JWT. Script + companion
-  `docker stats` sampler are committed at `load-test/` (`seed-users.js`,
-  `ws-ramp-test.js`, `capture-docker-stats.sh`) as a reusable artifact — rerun
-  the same way against the real AWS deployment once step 12 lands, for actual
-  sizing numbers.
-
-  **SCOPE CAVEAT (per the task that requested this): these are Docker Desktop
-  numbers, on one Mac, NOT AWS-representative.** chat-service was run under an
-  explicit, arbitrary 512MB memory / 1 CPU ceiling (`docker-compose.yml`'s
-  `deploy.resources.limits` — added specifically so this test would have a
-  ceiling to hit at all; Docker Desktop's own VM has no fixed relationship to
-  any real EC2 instance type). The absolute connection count below is a
-  methodology/failure-pattern validation for THIS environment, not a number to
-  plan AWS capacity around — that exercise happens once this script is rerun
-  against a real deployed instance.
-
-  - **First pass (1000 concurrent connections, ramped 50 at a time): zero
-    failures.** All 1000 WebSocket connections authenticated successfully;
-    chat-service's actual memory usage grew from a ~246MB baseline (JVM +
-    Spring context + Kafka consumer, before any test traffic) to only ~337MB
-    (66% of the 512MB ceiling) at 1000 concurrent connections — roughly 90-100KB
-    of REAL (resident) memory per connection, not the ~1MB assumed above. CPU
-    only spiked (briefly, to under 90%) during each ramp-up burst, then idled
-    near 0% at every plateau. This run did not find a ceiling at all.
-  - **Second pass (ramped toward 3000, 100 at a time): ceiling found around
-    ~1300-1400 concurrent connections** (chat-service's own logs show 1328
-    successful auth handshakes, zero closes, zero rejections, in the window
-    immediately before the crisis below started) — but NOT via total container
-    memory filling up. At the moment of failure, total container memory (RSS)
-    was still only ~338MB of the 512MB ceiling (66%) — comfortable headroom by
-    that measure. What actually broke was the **JVM's heap specifically**:
-    Java's container-aware default ergonomics caps max heap at 25% of the
-    container's memory limit (confirmed via `-XX:+PrintFlagsFinal`:
-    `MaxHeapSize` = 128MB for this 512MB container, `MaxRAMPercentage` = 25,
-    default) — so only 128MB, not 512MB, was ever available as heap, and IT is
-    what filled up first, well before the broader container ceiling. The
-    result was repeated `java.lang.OutOfMemoryError: Java heap space` across
-    HTTP/WebSocket acceptor and worker threads, sustained CPU pegged at
-    ~100-105% (the classic GC-thrashing "death spiral" — the JVM endlessly
-    running GC trying to free heap it can't, at the cost of doing any other
-    work), and cascading failure of essentially every subsequent connection
-    attempt (k6: `ws_connect_success` = 1349, `ws_connect_failure` = 12746 —
-    the failure count is inflated well past the true ceiling by k6's
-    `ramping-vus` executor immediately retrying with a new connection attempt
-    every time a VU's fast-failing iteration completed, a test-harness
-    amplification effect worth naming, not a second independent finding).
-  - **It did not self-recover.** Minutes after the offending load stopped and
-    every test connection had disconnected, chat-service was still resetting
-    new connections and logging fresh `OutOfMemoryError`s — a full container
-    restart (`docker restart`) was required to bring it back to a healthy
-    state. A JVM that has genuinely exhausted its heap under this kind of
-    sustained load does not degrade gracefully back to normal on its own here.
-  - **What this corrects vs. the theoretical reasoning above**: the assumed
-    bottleneck — ~1MB of thread-stack memory per connection accumulating
-    toward the instance's total memory — was NOT what actually happened. Real
-    per-connection memory overhead measured far lower (~90-100KB), consistent
-    with Tomcat's NIO connector not pinning a dedicated blocking OS thread to
-    every idle WebSocket connection the naive thread-per-connection model
-    assumes. The ceiling that WAS hit is heap object churn (WebSocket session
-    state, Jackson JSON buffers, connection-registry entries, Tomcat's
-    internal per-connection structures) exhausting a heap that was already
-    artificially small — 25% of container memory by JVM default — not the
-    container's own memory ceiling. **Practical, immediately-actionable
-    implication for real sizing (step 12)**: an instance sized purely by total
-    RAM, without also explicitly raising `-Xmx`/`-XX:MaxRAMPercentage` past the
-    25% default, will hit its real ceiling far earlier than its advertised
-    memory would suggest. Configuring `-XX:+ExitOnOutOfMemoryError` (or an
-    orchestrator health check that detects a JVM wedged in this state) so a
-    real deployment restarts automatically instead of silently serving from a
-    permanently-degraded instance is also now a concrete, evidence-backed
-    recommendation rather than boilerplate advice.
+- **Step 11 load test (k6) empirically validated single-instance capacity —
+  full write-up in [`docs/incidents.md`](docs/incidents.md).** Corrected the
+  thread-per-connection assumption above (~90-100KB measured per connection,
+  not ~1MB) and found a JVM/container-memory ceiling around 1,300-1,400
+  connections under a 512MB Docker Desktop container (not AWS-representative
+  — rerun `load-test/ws-ramp-test.js` against the real deployed instance for
+  actual sizing). **Actionable for step 12**: explicitly configure
+  `-Xmx`/`-XX:MaxRAMPercentage` past its 25% default and
+  `-XX:+ExitOnOutOfMemoryError` — the JVM's own default heap cap is what
+  failed first, not total container memory.
 - **If/when multiple Chat service instances are needed**: a shared registry
   (userId → instance) plus a pub/sub mechanism becomes necessary, since a live
   WebSocket connection physically exists in only one instance's memory. This is
@@ -437,62 +372,27 @@ discussion that weren't written down anywhere else yet.
   there's no task-definition concept to use once ECS itself is out of the
   picture.
   - **user-service's deploy-on-merge is a CloudFormation stack update, not a
-    direct `ec2:RunInstances` call** (revised after hitting this in
-    practice). The original `deploy-user-service.yml` bypassed
-    CloudFormation entirely — patched the Launch Template's UserData
-    directly via the EC2 API, then called `run-instances` /
-    `register-targets` / `deregister-targets` / `terminate-instances` by
-    hand to swap the running instance. That put two systems in charge of
-    the same resource: a later CloudFormation stack update (e.g. rotating
-    MysqlRootPassword/JwtSecret) would ALSO try to replace
-    `UserServiceInstance`, and the workflow's own hand-launched instance —
-    invisible to CloudFormation, since it was never created through it —
-    would linger as an orphan neither system cleaned up. Confirmed live,
-    not theoretical: this is exactly what produced two simultaneously
-    running, simultaneously-healthy user-service instances after a secrets
-    rotation collided with a workflow run.
-  - **The fix works because of one specific property wiring, not because
-    "a stack update" is magic.** `UserServiceInstance.Properties.LaunchTemplate.Version`
-    is `!GetAtt UserServiceLaunchTemplate.LatestVersionNumber`, not a
-    pinned number or `$Default`. Changing `UserServiceImageTag` causes
-    `Fn::Sub` to render different `LaunchTemplateData`, which creates a new
-    Launch Template VERSION (confirmed via `describe-change-set`:
-    `UserServiceLaunchTemplate [Replacement: False]` — a LaunchTemplate
-    resource is never "replaced," a new version is just added).
-    `LatestVersionNumber` changes as a result, which changes
-    `UserServiceInstance`'s own `LaunchTemplate.Version` PROPERTY within
-    the SAME update — and that property is `recreation: Always` for
-    `AWS::EC2::Instance` (also confirmed via `describe-change-set`, then
-    watched happen: `i-0bbc3604e498eefe5` → `i-02fc3a9650973b0ca` on
-    execute). Bumping which version is `$Default` would NOT have been
-    enough on its own — `$Default` only matters for launches that don't
-    pin a version explicitly, which this instance never does. It's the
-    `$Latest` wiring specifically that makes a plain parameter change
-    self-sufficient here.
-  - **`deploy-user-service.yml` now does exactly one AWS-mutating thing**:
-    fetches the live stack's current parameter keys (not hardcoded, so it
-    can't drift from the template's own Parameters section), builds a
-    parameters file setting only `UserServiceImageTag` to the new
-    short-SHA tag with `UsePreviousValue: true` for every other key, and
-    calls `cloudformation/deploy.sh deploy`. No more direct
-    `run-instances`/target-group calls, and therefore no more path for
-    this workflow to create an instance CloudFormation doesn't know about.
-    `UsePreviousValue` on every other parameter is load-bearing, not
-    boilerplate: without it, an update that only specifies
-    `UserServiceImageTag` would reset every unlisted parameter to the
-    TEMPLATE's default — silently wiping `MysqlRootPassword`/`JwtSecret`
-    back to empty, the exact failure that took the whole stack down
-    before (3.3's refresh-token secret-rotation incident).
-  - **Accepted tradeoff, not silently dropped**: the hand-built swap this
-    replaced explicitly created the new instance, verified it healthy in
-    the target group, and only then destroyed the old one —
-    zero-downtime by construction. Plain CloudFormation replacement of
-    `AWS::EC2::Instance` has no equivalent wait; there's no
-    `CreationPolicy`/`cfn-signal` wired into this template, so a bad
-    deploy can have a brief window where the old instance is already gone
-    before the new one is confirmed healthy. Revisit if that gap ever
-    actually matters in practice — not solved here, since it wasn't the
-    problem this change was fixing.
+    direct `ec2:RunInstances` call** — revised after a real incident where a
+    hand-rolled, CloudFormation-bypassing version of this workflow produced
+    an orphaned instance that collided with a later stack update and also
+    caused a secrets-wiping cascade; full story in
+    [`docs/incidents.md`](docs/incidents.md). `deploy-user-service.yml` now
+    does exactly one AWS-mutating thing: a stack update setting only
+    `UserServiceImageTag`, with `UsePreviousValue: true` on every other
+    parameter (load-bearing — without it, an update silently resets
+    unlisted parameters, including secrets, to the template's default).
+    This works because `UserServiceInstance.Properties.LaunchTemplate.Version`
+    is wired to `!GetAtt UserServiceLaunchTemplate.LatestVersionNumber`
+    (not pinned or `$Default`) — a new image tag creates a new Launch
+    Template version, `LatestVersionNumber` changes, and that property has
+    `recreation: Always` for `AWS::EC2::Instance`, so CloudFormation
+    replaces the instance itself on a plain parameter change.
+  - **Accepted tradeoff, not solved**: the hand-built swap this replaced
+    was zero-downtime by construction (create new, verify healthy, then
+    destroy old). Plain CloudFormation replacement of `AWS::EC2::Instance`
+    has no equivalent wait — no `CreationPolicy`/`cfn-signal` wired into
+    this template — so a bad deploy can have a brief window where the old
+    instance is already gone before the new one is confirmed healthy.
   - **chat-service keeps its existing mechanism unchanged** — its ASG
     Instance Refresh (`deploy-chat-service.yml`) was never the source of
     the conflict; only user-service's bespoke, CloudFormation-bypassing
@@ -507,24 +407,17 @@ discussion that weren't written down anywhere else yet.
   what makes that a single reliable operation instead of manually chasing
   every resource.
   - **Templates are staged in S3 and deployed via `--template-url`, not
-    `--template-body`** (decided after hitting this in practice). The AWS
-    API caps an inline template at 51,200 bytes; `chat-app-stack.yaml`
-    crossed that once step 12's hardening comments landed, and both
-    `validate-template` and `update-stack` began failing with a generic
-    "1 validation error detected" that echoes the entire template back and
-    looks nothing like a size limit. Referencing the template from S3
-    raises the ceiling to 460,800 bytes, so staging is the fix rather than
-    stripping the deliberately-verbose comments this project keeps. The
-    staging bucket (`chat-app-cfn-templates-<account-id>`) is private,
-    versioned, and encrypted — versioned specifically so every deployed
-    template revision stays retrievable for comparison after the fact.
-    `cloudformation/deploy.sh` performs the upload on EVERY invocation as
-    part of validate/deploy, so the staged copy cannot silently drift from
-    the local file the way a separate "remember to upload first" step
-    would. Note the bucket itself is deliberately NOT created by either
-    template: a template can't live in the bucket that the same template
-    creates, so it's a one-time out-of-band resource that intentionally
-    survives `delete-stack`.
+    `--template-body`** — the AWS API caps an inline template at 51,200
+    bytes, which `chat-app-stack.yaml` exceeded once step 12's hardening
+    comments landed (failure details in
+    [`docs/incidents.md`](docs/incidents.md)). Referencing from S3 raises
+    the ceiling to 460,800 bytes. The staging bucket
+    (`chat-app-cfn-templates-<account-id>`) is private, versioned, and
+    encrypted; `cloudformation/deploy.sh` re-uploads on every invocation so
+    the staged copy can't drift from the local file. The bucket itself is
+    deliberately NOT created by either template (a template can't live in
+    the bucket it creates) — a one-time out-of-band resource that
+    intentionally survives `delete-stack`.
 - **IAM: a scoped-down (not admin) IAM user**, created manually by the
   developer directly in the AWS console — a deliberate human checkpoint, not
   something generated by Claude Code. Its access keys are what later get
