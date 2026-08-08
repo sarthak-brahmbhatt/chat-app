@@ -4,7 +4,10 @@ A WhatsApp-style real-time chat application built from scratch as a hands-on
 systems-design and AWS learning project — every architectural choice below
 was deliberately made and documented, not defaulted into.
 
-**Live demo:** [sarthak-chat-app.beer](https://sarthak-chat-app.beer)
+**Live demo:** [sarthak-chat-app.beer](https://sarthak-chat-app.beer) — this
+was deployed for demo purposes and isn't kept running permanently (every hit
+costs money — see the cost-conscious AWS choices below), so it may be down
+if you're reading this later. Message me if you'd like it spun back up.
 
 ## What it does
 
