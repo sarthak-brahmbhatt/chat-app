@@ -1,10 +1,22 @@
-<div class="page chat-page">
-  <h1>Chat with {{ recipientLabel }}</h1>
+<div class="chat-view">
+  <div class="chat-header">
+    <!-- Back to the placeholder ("deselect" this chat, sidebar stays put) —
+         plain routerLink, same convention as the existing login/register
+         "hint" links (no Router/Location injection needed for a static
+         destination like this). Points at the shell's own bare /chat path,
+         not /users anymore - that route now redirects here (app.routes.ts). -->
+    <a routerLink="/chat" class="back-link" aria-label="Back">←</a>
+    <h1>{{ recipientLabel() }}</h1>
+  </div>
 
-  <div class="messages">
+  <div class="messages" #messagesEl (scroll)="onScroll()">
+    @if (loadingOlder()) {
+      <p class="loading-older">Loading older messages…</p>
+    }
     @for (bubble of bubbles(); track bubble.messageId) {
       <div class="bubble" [class.sent]="bubble.direction === 'sent'" [class.received]="bubble.direction === 'received'">
         <span>{{ bubble.content }}</span>
+        <span class="timestamp">{{ formatTimestamp(bubble.sentAt) }}</span>
         <!-- Tick indicator: '…' while waiting for the server's single-tick
              ack, '✓' once single tick arrives (server received it), '✓✓'
              once double tick arrives (the recipient's client confirmed

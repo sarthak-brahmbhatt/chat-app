@@ -9,6 +9,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.kafka.core.KafkaTemplate;
 
+import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,8 +39,9 @@ class ChatMessagePublisherTest {
     void publish_sendsToChatMessagesTopicWithCorrectEventContent() {
         lenient().when(kafkaTemplate.send(anyString(), anyString(), any())).thenReturn(new CompletableFuture<>());
         ChatMessagePublisher publisher = new ChatMessagePublisher(kafkaTemplate);
+        Instant sentAt = Instant.parse("2026-01-01T10:00:00Z");
 
-        publisher.publish("42", request("m-1", "99", "hello"));
+        publisher.publish("42", request("m-1", "99", "hello"), sentAt);
 
         ArgumentCaptor<ChatMessageEvent> eventCaptor = ArgumentCaptor.forClass(ChatMessageEvent.class);
         verify(kafkaTemplate).send(eq(KafkaTopicConfig.CHAT_MESSAGES_TOPIC), eq("42:99"), eventCaptor.capture());
@@ -48,7 +50,10 @@ class ChatMessagePublisherTest {
         assertThat(event.senderId()).isEqualTo("42");
         assertThat(event.recipientId()).isEqualTo("99");
         assertThat(event.content()).isEqualTo("hello");
-        assertThat(event.sentAt()).isNotNull();
+        // Passed straight through, unmodified - the caller (ChatWebSocketHandler)
+        // mints this once so it can also be shared with the live incoming_message
+        // envelope; this method must never call Instant.now() itself.
+        assertThat(event.sentAt()).isEqualTo(sentAt);
     }
 
     @Test
@@ -86,7 +91,7 @@ class ChatMessagePublisherTest {
         when(kafkaTemplate.send(anyString(), anyString(), any())).thenReturn(new CompletableFuture<>());
         ChatMessagePublisher publisher = new ChatMessagePublisher(kafkaTemplate);
 
-        publisher.publish("42", request("m-2", "99", "hello"));
+        publisher.publish("42", request("m-2", "99", "hello"), Instant.now());
         // Reaching this line at all is the assertion — publish() returned.
     }
 
@@ -99,7 +104,7 @@ class ChatMessagePublisherTest {
         // No assertThrows here on purpose: the point is that NOTHING is
         // thrown back to the caller. If publish() let this propagate, this
         // test method itself would fail with an unexpected exception.
-        publisher.publish("42", request("m-3", "99", "hello"));
+        publisher.publish("42", request("m-3", "99", "hello"), Instant.now());
     }
 
     @Test

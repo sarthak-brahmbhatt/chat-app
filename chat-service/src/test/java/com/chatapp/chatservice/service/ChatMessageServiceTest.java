@@ -11,6 +11,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Pageable;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,7 +76,7 @@ class ChatMessageServiceTest {
                         message("m-2", "42", "99", "second", t2, false),
                         message("m-1", "42", "99", "first", t1, true)));
 
-        ConversationHistoryResponse response = service.getConversationHistory("42", "99");
+        ConversationHistoryResponse response = service.getConversationHistory("42", "99", null);
 
         assertThat(response.getMessages()).extracting("messageId").containsExactly("m-1", "m-2", "m-3");
         assertThat(response.getMessage()).isEqualTo("3 message(s) found.");
@@ -90,7 +91,7 @@ class ChatMessageServiceTest {
         when(chatMessageRepository.findConversationMostRecentFirst(eq("42"), eq("nobody-real"), any(Pageable.class)))
                 .thenReturn(List.of());
 
-        ConversationHistoryResponse response = service.getConversationHistory("42", "nobody-real");
+        ConversationHistoryResponse response = service.getConversationHistory("42", "nobody-real", null);
 
         assertThat(response.getMessages()).isEmpty();
         // "No messages yet." not a bare empty array with no context - same
@@ -100,6 +101,7 @@ class ChatMessageServiceTest {
         // produces - see ConversationControllerTest for that distinction
         // (or rather, deliberate lack of one) tested at the HTTP layer.
         assertThat(response.getMessage()).isEqualTo("No messages yet.");
+        assertThat(response.isHasMore()).isFalse();
     }
 
     @Test
@@ -108,7 +110,7 @@ class ChatMessageServiceTest {
         when(chatMessageRepository.findConversationMostRecentFirst(eq("42"), eq("99"), any(Pageable.class)))
                 .thenReturn(List.of());
 
-        service.getConversationHistory("42", "99");
+        service.getConversationHistory("42", "99", null);
 
         ArgumentCaptor<Pageable> pageableCaptor = ArgumentCaptor.forClass(Pageable.class);
         verify(chatMessageRepository).findConversationMostRecentFirst(eq("42"), eq("99"), pageableCaptor.capture());
@@ -116,6 +118,45 @@ class ChatMessageServiceTest {
         assertThat(pageable.getPageSize()).isEqualTo(50);
         assertThat(pageable.getPageNumber()).isZero();
         assertThat(pageable.getSort().getOrderFor("sentAt").isDescending()).isTrue();
+    }
+
+    @Test
+    void getConversationHistory_withFullPage_reportsHasMoreTrue() {
+        ChatMessageService service = new ChatMessageService(chatMessageRepository);
+        List<ChatMessage> fiftyMessages = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            fiftyMessages.add(message("m-" + i, "42", "99", "content " + i, Instant.parse("2026-01-01T10:00:00Z").plusSeconds(i), true));
+        }
+        when(chatMessageRepository.findConversationMostRecentFirst(eq("42"), eq("99"), any(Pageable.class)))
+                .thenReturn(fiftyMessages);
+
+        ConversationHistoryResponse response = service.getConversationHistory("42", "99", null);
+
+        assertThat(response.isHasMore()).isTrue();
+    }
+
+    @Test
+    void getConversationHistory_withPartialPage_reportsHasMoreFalse() {
+        ChatMessageService service = new ChatMessageService(chatMessageRepository);
+        when(chatMessageRepository.findConversationMostRecentFirst(eq("42"), eq("99"), any(Pageable.class)))
+                .thenReturn(List.of(message("m-1", "42", "99", "hi", Instant.parse("2026-01-01T10:00:00Z"), true)));
+
+        ConversationHistoryResponse response = service.getConversationHistory("42", "99", null);
+
+        assertThat(response.isHasMore()).isFalse();
+    }
+
+    @Test
+    void getConversationHistory_withBeforeCursor_delegatesToBeforeQueryNotFirstPageQuery() {
+        ChatMessageService service = new ChatMessageService(chatMessageRepository);
+        Instant cursor = Instant.parse("2026-01-01T10:00:00Z");
+        when(chatMessageRepository.findConversationBeforeMostRecentFirst(eq("42"), eq("99"), eq(cursor), any(Pageable.class)))
+                .thenReturn(List.of(message("m-old", "42", "99", "older", cursor.minusSeconds(60), true)));
+
+        ConversationHistoryResponse response = service.getConversationHistory("42", "99", cursor);
+
+        assertThat(response.getMessages()).extracting("messageId").containsExactly("m-old");
+        verify(chatMessageRepository, never()).findConversationMostRecentFirst(any(), any(), any());
     }
 
     @Test

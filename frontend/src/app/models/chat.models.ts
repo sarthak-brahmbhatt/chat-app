@@ -33,11 +33,17 @@ export interface TickAck {
 }
 
 // Server -> Recipient: a live-delivered message.
+// sentAt (ISO-8601 string, same shape as ConversationMessageResponse.sentAt
+// below) was added alongside message timestamps in the UI — chat-service
+// mints ONE Instant per message and shares it with both this live envelope
+// and the persisted row, so a message's live-delivered timestamp and its
+// later-read-from-history timestamp are always identical.
 export interface IncomingChatMessage {
   type: 'incoming_message';
   messageId: string;
   senderId: string;
   content: string;
+  sentAt: string;
 }
 
 // Client -> Server (build-order step 9): sent automatically by ChatService
@@ -61,10 +67,9 @@ export type ServerChatEvent = TickAck | IncomingChatMessage;
  * isn't folded into ServerChatEvent.
  *
  * `sentAt` arrives as an ISO-8601 string (Jackson's default Instant
- * serialization) — kept as a string here rather than parsed into a Date,
- * since ChatComponent only ever needs to sort/display these once already
- * in the server's own oldest-to-newest order, never to do date arithmetic
- * on them.
+ * serialization) — kept as a string on the wire type itself; ChatComponent
+ * parses it into a `Date` only at render time (for the WhatsApp-style
+ * today-vs-older timestamp format), not stored pre-parsed here.
  */
 export interface ConversationMessageResponse {
   messageId: string;
@@ -75,8 +80,17 @@ export interface ConversationMessageResponse {
   delivered: boolean;
 }
 
-/** The response body for GET /conversations/{otherUserId}/messages. */
+/**
+ * The response body for GET /conversations/{otherUserId}/messages.
+ *
+ * `hasMore` (added alongside cursor pagination): true when a full page (50)
+ * came back, meaning an older page might still exist — ChatComponent's
+ * scroll-to-top handler uses this to know when to stop trying. See
+ * ConversationHistoryResponse.java (chat-service) for the accepted
+ * imprecision this carries.
+ */
 export interface ConversationHistoryResponse {
   messages: ConversationMessageResponse[];
   message: string;
+  hasMore: boolean;
 }

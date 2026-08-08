@@ -21,6 +21,7 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -192,6 +193,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      * logged and dropped rather than closing the connection — unlike a bad
      * auth token, a single malformed chat message on an already-authenticated
      * session isn't a reason to tear down the whole connection.
+     *
+     * sentAt is minted ONCE here, not separately inside the Kafka publish and
+     * the live delivery - both ChatMessagePublisher.publish (the persisted
+     * ChatMessageEvent) and IncomingChatMessage (the live envelope) are given
+     * this SAME Instant, so a message's persisted timestamp and its
+     * live-delivered timestamp can never disagree by the few milliseconds
+     * two separate Instant.now() calls would otherwise drift apart.
      */
     private void handleChatMessage(WebSocketSession session, String payload) throws IOException {
         ChatMessageRequest request;
@@ -208,10 +216,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         String senderId = (String) session.getAttributes().get(USER_ID_ATTRIBUTE);
+        Instant sentAt = Instant.now();
 
         sendSingleTickAck(session, request.messageId());
-        chatMessagePublisher.publish(senderId, request);
-        deliverIfRecipientConnected(senderId, request);
+        chatMessagePublisher.publish(senderId, request, sentAt);
+        deliverIfRecipientConnected(senderId, request, sentAt);
     }
 
     private void sendSingleTickAck(WebSocketSession session, String messageId) throws IOException {
@@ -219,7 +228,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         session.sendMessage(new TextMessage(objectMapper.writeValueAsString(ack)));
     }
 
-    private void deliverIfRecipientConnected(String senderId, ChatMessageRequest request) {
+    private void deliverIfRecipientConnected(String senderId, ChatMessageRequest request, Instant sentAt) {
         Optional<WebSocketSession> recipientSession = connectionRegistry.find(request.recipientId());
         if (recipientSession.isEmpty()) {
             log.info("Recipient {} not connected; message {} not delivered live", request.recipientId(), request.messageId());
@@ -227,7 +236,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
 
         try {
-            IncomingChatMessage incoming = IncomingChatMessage.from(senderId, request);
+            IncomingChatMessage incoming = IncomingChatMessage.from(senderId, request, sentAt);
             recipientSession.get().sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
         } catch (IOException e) {
             // The recipient's socket looked connected a moment ago but failed

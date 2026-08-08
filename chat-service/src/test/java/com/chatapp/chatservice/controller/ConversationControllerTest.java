@@ -21,6 +21,7 @@ import java.util.Date;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -90,8 +91,8 @@ class ConversationControllerTest {
     void getConversationHistory_withValidTokenAndMessages_returns200WithHistory() throws Exception {
         ConversationMessageResponse msg = new ConversationMessageResponse(
                 "m-1", "42", "99", "hi there", Instant.parse("2026-01-01T10:00:00Z"), true);
-        when(chatMessageService.getConversationHistory("42", "99"))
-                .thenReturn(new ConversationHistoryResponse(List.of(msg), "1 message(s) found."));
+        when(chatMessageService.getConversationHistory("42", "99", null))
+                .thenReturn(new ConversationHistoryResponse(List.of(msg), "1 message(s) found.", false));
 
         mockMvc.perform(get("/conversations/99/messages")
                         .header("Authorization", "Bearer " + tokenFor("42")))
@@ -101,7 +102,8 @@ class ConversationControllerTest {
                 .andExpect(jsonPath("$.messages[0].senderId").value("42"))
                 .andExpect(jsonPath("$.messages[0].recipientId").value("99"))
                 .andExpect(jsonPath("$.messages[0].content").value("hi there"))
-                .andExpect(jsonPath("$.messages[0].delivered").value(true));
+                .andExpect(jsonPath("$.messages[0].delivered").value(true))
+                .andExpect(jsonPath("$.hasMore").value(false));
     }
 
     @Test
@@ -140,8 +142,8 @@ class ConversationControllerTest {
 
     @Test
     void getConversationHistory_newConversationWithRealPartner_returns200WithEmptyHistoryAndAppropriateMessage() throws Exception {
-        when(chatMessageService.getConversationHistory("42", "99"))
-                .thenReturn(new ConversationHistoryResponse(List.of(), "No messages yet."));
+        when(chatMessageService.getConversationHistory("42", "99", null))
+                .thenReturn(new ConversationHistoryResponse(List.of(), "No messages yet.", false));
 
         mockMvc.perform(get("/conversations/99/messages")
                         .header("Authorization", "Bearer " + tokenFor("42")))
@@ -159,8 +161,8 @@ class ConversationControllerTest {
         // the full reasoning: no users table of its own, and no
         // cross-service call to user-service to check). This test proves
         // that at the HTTP layer, not just asserts it in a comment.
-        when(chatMessageService.getConversationHistory("42", "definitely-not-a-real-user-id"))
-                .thenReturn(new ConversationHistoryResponse(List.of(), "No messages yet."));
+        when(chatMessageService.getConversationHistory("42", "definitely-not-a-real-user-id", null))
+                .thenReturn(new ConversationHistoryResponse(List.of(), "No messages yet.", false));
 
         mockMvc.perform(get("/conversations/definitely-not-a-real-user-id/messages")
                         .header("Authorization", "Bearer " + tokenFor("42")))
@@ -178,11 +180,44 @@ class ConversationControllerTest {
         // Mockito's default "no stub matched" behavior (returning null,
         // which the controller would NPE on) making any wrong wiring fail
         // loudly rather than silently pass.
-        when(chatMessageService.getConversationHistory(eq("42"), eq("99")))
-                .thenReturn(new ConversationHistoryResponse(List.of(), "No messages yet."));
+        when(chatMessageService.getConversationHistory(eq("42"), eq("99"), isNull()))
+                .thenReturn(new ConversationHistoryResponse(List.of(), "No messages yet.", false));
 
         mockMvc.perform(get("/conversations/99/messages")
                         .header("Authorization", "Bearer " + tokenFor("42")))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    void getConversationHistory_withBeforeParam_parsesAndPassesInstantToService() throws Exception {
+        when(chatMessageService.getConversationHistory(eq("42"), eq("99"), eq(Instant.parse("2026-01-01T10:00:00Z"))))
+                .thenReturn(new ConversationHistoryResponse(List.of(), "No messages yet.", false));
+
+        mockMvc.perform(get("/conversations/99/messages")
+                        .param("before", "2026-01-01T10:00:00Z")
+                        .header("Authorization", "Bearer " + tokenFor("42")))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void getConversationHistory_withMalformedBeforeParam_returns400() throws Exception {
+        mockMvc.perform(get("/conversations/99/messages")
+                        .param("before", "not-a-timestamp")
+                        .header("Authorization", "Bearer " + tokenFor("42")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("Invalid 'before' timestamp"));
+    }
+
+    @Test
+    void getConversationHistory_withFullPage_returns200WithHasMoreTrue() throws Exception {
+        ConversationMessageResponse msg = new ConversationMessageResponse(
+                "m-1", "42", "99", "hi there", Instant.parse("2026-01-01T10:00:00Z"), true);
+        when(chatMessageService.getConversationHistory("42", "99", null))
+                .thenReturn(new ConversationHistoryResponse(List.of(msg), "1 message(s) found.", true));
+
+        mockMvc.perform(get("/conversations/99/messages")
+                        .header("Authorization", "Bearer " + tokenFor("42")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.hasMore").value(true));
     }
 }

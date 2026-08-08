@@ -18,6 +18,7 @@ import org.springframework.kafka.test.utils.ContainerTestUtils;
 import org.springframework.test.context.TestPropertySource;
 
 import java.time.Duration;
+import java.time.Instant;
 
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -87,7 +88,7 @@ class KafkaEndToEndTest {
         MessageListenerContainer container = endpointRegistry.getListenerContainers().iterator().next();
         ContainerTestUtils.waitForAssignment(container, 3);
 
-        chatMessagePublisher.publish("42", new ChatMessageRequest("message", "m-e2e-1", "99", "hello via real kafka"));
+        chatMessagePublisher.publish("42", new ChatMessageRequest("message", "m-e2e-1", "99", "hello via real kafka"), Instant.now());
 
         // Kafka delivery is asynchronous end-to-end — the consumer runs on
         // its own background poller thread, so the save() call this
@@ -121,7 +122,7 @@ class KafkaEndToEndTest {
         MessageListenerContainer container = endpointRegistry.getListenerContainers().iterator().next();
         ContainerTestUtils.waitForAssignment(container, 3);
 
-        chatMessagePublisher.publish("42", new ChatMessageRequest("message", "m-order-1", "99", "hello"));
+        chatMessagePublisher.publish("42", new ChatMessageRequest("message", "m-order-1", "99", "hello"), Instant.now());
         chatMessagePublisher.publishDelivered("42", "99", "m-order-1");
 
         InOrder inOrder = inOrder(chatMessageRepository);

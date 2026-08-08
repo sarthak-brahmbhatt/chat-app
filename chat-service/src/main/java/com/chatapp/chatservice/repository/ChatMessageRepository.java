@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -53,6 +54,40 @@ public interface ChatMessageRepository extends JpaRepository<ChatMessage, Long> 
             """)
     List<ChatMessage> findConversationMostRecentFirst(
             @Param("userA") String userA, @Param("userB") String userB, Pageable pageable);
+
+    /**
+     * Same shape as {@link #findConversationMostRecentFirst}, for every page
+     * after the first — "before" is a cursor, not an offset: the caller
+     * supplies the {@code sentAt} of the oldest message it already has, and
+     * this returns the next page of messages strictly older than that.
+     * Cursor-based rather than OFFSET/page-number-based deliberately: this
+     * view only ever pages backward into the past while new messages keep
+     * arriving at the live end, which is exactly the access pattern OFFSET
+     * pagination gets wrong — a new row arriving while a caller pages
+     * backward shifts every existing row's offset by one, causing the next
+     * page fetched by offset to skip or duplicate a row at the boundary. A
+     * `sentAt <` cursor is anchored to a value that never changes
+     * retroactively, so it's immune to that regardless of how many new
+     * messages arrive in the meantime.
+     *
+     * No secondary tie-break column for messages sharing the exact same
+     * {@code sentAt} microsecond — accepted, not solved: MySQL's
+     * {@code datetime(6)} column this is backed by has microsecond
+     * precision, and two messages between the same pair of users landing in
+     * the same microsecond is not a realistic occurrence at this
+     * (human-typing-speed, WebSocket-per-session) scale. Revisit only if
+     * that assumption is ever shown to be wrong.
+     */
+    @Query("""
+            SELECT m FROM ChatMessage m
+            WHERE ((m.senderId = :userA AND m.recipientId = :userB)
+               OR (m.senderId = :userB AND m.recipientId = :userA))
+              AND m.sentAt < :before
+            ORDER BY m.sentAt DESC
+            """)
+    List<ChatMessage> findConversationBeforeMostRecentFirst(
+            @Param("userA") String userA, @Param("userB") String userB,
+            @Param("before") Instant before, Pageable pageable);
 
     /**
      * A direct bulk UPDATE rather than find-then-save: this only ever needs

@@ -12,7 +12,11 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 
 /**
  * chat-service's FIRST-EVER plain REST endpoint — everything before this
@@ -70,11 +74,17 @@ public class ConversationController {
      * custom headers at all, the entire reason CLAUDE.md 3.3 sends the
      * token as the first WS message instead), there's no reason NOT to use
      * the standard Authorization header here.
+     *
+     * `before` (optional query param, ISO-8601 instant) is the cursor for
+     * every page after the first — see ChatMessageRepository's
+     * findConversationBeforeMostRecentFirst for why this is cursor-based,
+     * not offset-based. Absent means "the first (most recent) page."
      */
     @GetMapping("/conversations/{otherUserId}/messages")
     public ResponseEntity<?> getConversationHistory(
             @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authHeader,
-            @PathVariable String otherUserId) {
+            @PathVariable String otherUserId,
+            @RequestParam(required = false) String before) {
 
         if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
             return unauthorized("Missing or malformed Authorization header");
@@ -93,9 +103,19 @@ public class ConversationController {
             return unauthorized("Invalid or expired token");
         }
 
+        Instant beforeCursor = null;
+        if (before != null) {
+            try {
+                beforeCursor = Instant.parse(before);
+            } catch (DateTimeParseException e) {
+                return ResponseEntity.badRequest().body(new ErrorResponse("Invalid 'before' timestamp"));
+            }
+        }
+
         String currentUserId = claims.getSubject();
 
-        ConversationHistoryResponse history = chatMessageService.getConversationHistory(currentUserId, otherUserId);
+        ConversationHistoryResponse history =
+                chatMessageService.getConversationHistory(currentUserId, otherUserId, beforeCursor);
         return ResponseEntity.ok(history);
     }
 

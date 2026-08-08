@@ -75,21 +75,161 @@ button.secondary {
   color: #2563eb;
 }
 
-.chat-page {
-  max-width: 600px;
+/* Split-pane chat shell (CLAUDE.md build-order step 17) — a persistent
+   sidebar plus a right panel that fills the remaining space with whichever
+   child route is active. `height: 100vh` on the shell itself (rather than
+   relying on html/body/app-root all propagating a height down) is what
+   makes the flex layout below actually fill the viewport regardless of
+   app-root's own (unstyled, default `inline`) display type. */
+.chat-shell {
+  display: flex;
+  height: 100vh;
+}
+
+.sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  border-right: 1px solid #ddd;
+  background: white;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border-bottom: 1px solid #eee;
+}
+
+.sidebar-header h1 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.sidebar-status {
+  padding: 1rem;
+  color: #666;
+}
+
+.user-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.user-list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #eee;
+}
+
+.user-list-item.active {
+  background: #eef2ff;
+}
+
+.chat-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* app-chat / app-chat-placeholder are Angular component HOST elements
+   (custom elements), not something .chat-view/.chat-placeholder can size
+   via `height: 100%` alone: a plain custom element defaults to
+   `display: inline`, and even once blockified as a flex item, a
+   column-direction flex container's default cross-axis behavior does NOT
+   stretch items along the MAIN axis (height, here) — only `flex-grow`
+   does. Without this rule, .chat-view's `height: 100%` resolves against a
+   parent (app-chat) whose own height is just "auto" (shrink-to-fit
+   content), which is exactly what silently broke .messages' scroll
+   clipping the first time this was tested: the container grew to fit
+   all 50 rendered bubbles instead of being clipped by the viewport. */
+.chat-panel > app-chat,
+.chat-panel > app-chat-placeholder {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #888;
+}
+
+/* Everything below fills .chat-panel — a column layout of its own (header /
+   scrollable message list / composer), unlike the old standalone-page
+   `.page.chat-page` this replaced, which centered a fixed-max-width card on
+   the body instead. flex: 1 + min-height: 0 rather than height: 100% - see
+   the app-chat rule above for why height: 100% alone doesn't chain through
+   a custom element boundary. */
+.chat-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 1rem;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex-shrink: 0;
+}
+
+.chat-header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.back-link {
+  color: #2563eb;
+  text-decoration: none;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.back-link:hover {
+  text-decoration: underline;
 }
 
 .messages {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  min-height: 300px;
-  max-height: 50vh;
+  /* flex: 1 + min-height: 0 (not the old fixed min-height/max-height pair)
+     is what lets this fill whatever vertical space .chat-view has left
+     around the header/composer, and what makes overflow-y actually scroll
+     instead of the flex item refusing to shrink below its content size —
+     a classic flexbox gotcha (a flex item's default min-height is `auto`,
+     effectively "as tall as its content," which silently defeats
+     overflow-y: auto without this). */
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 0.75rem;
   background: #f0f0f0;
   border-radius: 6px;
   margin-bottom: 1rem;
+}
+
+.loading-older {
+  text-align: center;
+  font-size: 0.8rem;
+  color: #888;
+  margin: 0 0 0.5rem;
 }
 
 .bubble {
@@ -113,6 +253,13 @@ button.secondary {
   border: 1px solid #ddd;
 }
 
+.timestamp {
+  font-size: 0.7rem;
+  opacity: 0.7;
+  white-space: nowrap;
+  align-self: flex-end;
+}
+
 .tick {
   font-size: 0.75rem;
   opacity: 0.8;
@@ -131,6 +278,7 @@ button.secondary {
 .composer {
   display: flex;
   gap: 0.5rem;
+  flex-shrink: 0;
 }
 
 .composer input {

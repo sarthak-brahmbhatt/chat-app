@@ -25,6 +25,7 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -32,6 +33,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 
 /**
  * An end-to-end test of the real WebSocket round trip: boots a real embedded
@@ -84,7 +86,12 @@ class ChatWebSocketIntegrationTest {
     @Value("${local.server.port}")
     private int port;
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    // findAndRegisterModules() picks up JavaTimeModule from the classpath -
+    // needed to deserialize IncomingChatMessage.sentAt (Instant) in this
+    // test's own assertions. The REAL server-side ObjectMapper bean already
+    // has this via Spring Boot's autoconfiguration; this is purely a
+    // test-local fixture concern, not a production gap.
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper().findAndRegisterModules();
 
     private String wsUri() {
         return "ws://localhost:" + port + "/ws/chat";
@@ -205,7 +212,13 @@ class ChatWebSocketIntegrationTest {
 
         String deliveredJson = recipientHandler.receivedMessages.poll(5, TimeUnit.SECONDS);
         IncomingChatMessage delivered = OBJECT_MAPPER.readValue(deliveredJson, IncomingChatMessage.class);
-        assertThat(delivered).isEqualTo(new IncomingChatMessage("incoming_message", "m-int-2", "101", "hey 202, it's 101"));
+        // sentAt is a real Instant.now() minted server-side, not predictable
+        // exactly - asserted separately rather than folded into exact equality.
+        assertThat(delivered.type()).isEqualTo("incoming_message");
+        assertThat(delivered.messageId()).isEqualTo("m-int-2");
+        assertThat(delivered.senderId()).isEqualTo("101");
+        assertThat(delivered.content()).isEqualTo("hey 202, it's 101");
+        assertThat(delivered.sentAt()).isCloseTo(Instant.now(), within(5, ChronoUnit.SECONDS));
 
         senderSession.close();
         recipientSession.close();

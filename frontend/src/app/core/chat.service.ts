@@ -73,13 +73,20 @@ export class ChatService {
    * call in this app; ChatService doesn't need to do anything extra for
    * auth here despite otherwise being all about the WebSocket connection.
    *
-   * ChatComponent is responsible for calling this BEFORE connect() — see
-   * that component's ngOnInit for why that ordering (not this method) is
-   * what actually prevents a gap/duplicate at the history-to-live
-   * transition.
+   * ChatComponent is responsible for calling this BEFORE treating the
+   * conversation as "live" — see that component's history-loading logic
+   * for why that ordering is what actually prevents a gap/duplicate at the
+   * history-to-live transition.
+   *
+   * `before` (optional, an ISO-8601 instant — the `sentAt` of the oldest
+   * message already loaded) is the cursor for every page after the first;
+   * omitted means the first (most recent) page. See CLAUDE.md 4 for why
+   * this is cursor-based, not offset-based.
    */
-  getHistory(otherUserId: string): Observable<ConversationHistoryResponse> {
-    return this.http.get<ConversationHistoryResponse>(`${CHAT_SERVICE_BASE_URL}/conversations/${otherUserId}/messages`);
+  getHistory(otherUserId: string, before?: string): Observable<ConversationHistoryResponse> {
+    const url = `${CHAT_SERVICE_BASE_URL}/conversations/${otherUserId}/messages`;
+    const params = before ? { before } : undefined;
+    return this.http.get<ConversationHistoryResponse>(url, { params });
   }
 
   connect(): void {

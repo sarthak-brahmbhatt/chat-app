@@ -11,6 +11,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -33,21 +34,9 @@ public class ChatMessageService {
 
     private static final Logger log = LoggerFactory.getLogger(ChatMessageService.class);
 
-    // Not a query parameter the client controls — build-order scope for this
-    // pass is "populate history when a chat opens," not a scrollable/
-    // paginated history view. A fixed limit is simplest given that scope,
-    // and 50 is a reasonable amount of context to load a conversation with
-    // without needing anything more.
-    //
-    // "Load more" (cursor/offset-based pagination past this first page) is a
-    // documented, deliberate FUTURE item, not solved here - see CLAUDE.md 4
-    // for where this is recorded. The reason it's not built now: it needs
-    // real product decisions this pass doesn't have an answer for yet (does
-    // "load more" prepend older messages above the current scroll position?
-    // what's the UX for triggering it - a button, or scroll-to-top?), not
-    // just a bigger LIMIT. Building the fetch-more-on-demand mechanics ahead
-    // of those decisions would be guessing at requirements that don't exist
-    // yet.
+    // The page size for both the initial history fetch and every subsequent
+    // scroll-to-top "load older" page (CLAUDE.md 4) - one constant for both,
+    // since there's no reason the two should ever disagree.
     private static final int HISTORY_LIMIT = 50;
 
     private final ChatMessageRepository chatMessageRepository;
@@ -63,6 +52,14 @@ public class ChatMessageService {
      * order the repository query itself uses to correctly pick out the most
      * RECENT N rows (see ChatMessageRepository's own comment for why those
      * two orderings can't both be satisfied by one ORDER BY).
+     *
+     * `before`, when present, is the cursor for every page after the first —
+     * the caller-supplied {@code sentAt} of the oldest message it already
+     * has (ChatComponent's scroll-to-top "load older" handler). `null` means
+     * "the first page," i.e. the most recent HISTORY_LIMIT messages, using
+     * the plain (cursor-less) repository query. See
+     * ChatMessageRepository.findConversationBeforeMostRecentFirst for why
+     * this is cursor-based rather than offset-based.
      *
      * "otherUserId doesn't correspond to a real user" and "otherUserId is a
      * real user I've simply never messaged" are, from THIS service's point
@@ -81,14 +78,14 @@ public class ChatMessageService {
      * which is the only thing this service can actually answer questions
      * about.
      */
-    public ConversationHistoryResponse getConversationHistory(String currentUserId, String otherUserId) {
+    public ConversationHistoryResponse getConversationHistory(String currentUserId, String otherUserId, Instant before) {
         Pageable mostRecentFirst = PageRequest.of(0, HISTORY_LIMIT, Sort.by("sentAt").descending());
 
-        List<ConversationMessageResponse> descending =
-                chatMessageRepository.findConversationMostRecentFirst(currentUserId, otherUserId, mostRecentFirst)
-                        .stream()
-                        .map(ConversationMessageResponse::from)
-                        .toList();
+        List<ChatMessage> page = before == null
+                ? chatMessageRepository.findConversationMostRecentFirst(currentUserId, otherUserId, mostRecentFirst)
+                : chatMessageRepository.findConversationBeforeMostRecentFirst(currentUserId, otherUserId, before, mostRecentFirst);
+
+        List<ConversationMessageResponse> descending = page.stream().map(ConversationMessageResponse::from).toList();
 
         // .toList() is immutable - Collections.reverse() needs a mutable
         // list to reverse in place, hence the explicit copy.
@@ -99,7 +96,14 @@ public class ChatMessageService {
                 ? "No messages yet."
                 : oldestToNewest.size() + " message(s) found.";
 
-        return new ConversationHistoryResponse(oldestToNewest, message);
+        // A full page came back => there MIGHT be an older page still - see
+        // ConversationHistoryResponse's own comment for the accepted
+        // imprecision this carries (a conversation with exactly one more
+        // full page left still reports true, costing one harmless empty
+        // fetch next scroll).
+        boolean hasMore = page.size() == HISTORY_LIMIT;
+
+        return new ConversationHistoryResponse(oldestToNewest, message, hasMore);
     }
 
     /**

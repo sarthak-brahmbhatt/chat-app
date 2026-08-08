@@ -465,15 +465,37 @@ discussion that weren't written down anywhere else yet.
     doesn't exist yet. Revisit and promote to an interceptor the moment a
     *second* REST endpoint is added to chat-service — at that point the
     duplication becomes real, not hypothetical.
-  - **Limit: fixed at the most recent 50 messages, oldest-to-newest within
-    that window. No "load more" / pagination in this pass.** Selected via a
-    single `DESC ... LIMIT 50` query (`Pageable`), reversed in memory before
+  - **Page size: 50 messages, oldest-to-newest within a page.** Selected via
+    a `DESC ... LIMIT 50` query (`Pageable`), reversed in memory before
     returning — the DB has to select by recency to get the *right* 50 rows,
-    even though the response itself reads oldest-first. "Load more" is a
-    real, deliberately deferred future item, not an oversight: it raises UX
-    questions (prepend-on-scroll-up vs. an explicit button, a cursor/offset
-    contract) that haven't been designed yet, and building the mechanics
-    ahead of those decisions would be guessing rather than deciding.
+    even though the response itself reads oldest-first.
+  - **Pagination (resolved, chat UI improvements pass): cursor-based via an
+    optional `?before=<ISO-8601 instant>` query param, not offset/page-number
+    based.** The access pattern this endpoint actually serves is "page
+    backward into the past while new messages keep arriving at the live
+    end" — ChatComponent's scroll-to-top handler asks for the page just
+    older than whatever it already has. That's exactly the case OFFSET
+    pagination gets wrong: a new message arriving mid-scroll shifts every
+    existing row's offset by one, silently skipping or duplicating a row at
+    the next page's boundary. A `sentAt <` cursor is anchored to a value
+    that never changes retroactively, so new messages arriving during
+    pagination can't corrupt it. Omitting `before` means "the first
+    (most recent) page" — unchanged from before this pass.
+    `ChatMessageRepository.findConversationBeforeMostRecentFirst` is the new
+    cursor query, same shape as the original `findConversationMostRecentFirst`
+    plus a `sentAt < :before` predicate. No secondary tie-break column for
+    two messages landing in the exact same microsecond — accepted, not
+    solved, given `datetime(6)` precision and this app's human-typing-speed
+    message volume; revisit only if that assumption is ever shown wrong.
+  - **`hasMore` (boolean, added to `ConversationHistoryResponse` alongside
+    `messages`/`message`)**: true when a full 50-row page came back, false
+    otherwise. Computed off the page size rather than a separate `COUNT`
+    query — the accepted imprecision (a conversation with *exactly* one
+    more full page left still reports `true`, costing one harmless empty
+    fetch on the next scroll-to-top) is cheaper than a second query on every
+    single request just to avoid that one wasted round trip.
+  - **Malformed `before`** (fails `Instant.parse`) → 400 with an
+    `ErrorResponse` body, same shape as the existing 401 responses.
   - **A conversation with an `otherUserId` that doesn't correspond to any
     real user returns the exact same response as a real user with no shared
     history: `{"messages": [], "message": "No messages yet."}`.** This is
@@ -597,3 +619,87 @@ discussion that weren't written down anywhere else yet.
     a live-only signal: the delivered_ack/Kafka-insert persistence race (fixed
     structurally via same-partition-key Kafka ordering) and messages sent while
     the recipient was fully offline (fixed via a reconnect-time delivery sweep).
+16. Chat UI polish, first pass — a back/list link in `ChatComponent`'s header
+    (`routerLink`), the chat header showing the other user's real first+last
+    name (forwarded via Angular Router navigation state from `UserListComponent`'s
+    `startChat()`, since `GET /users` already has it on hand — no extra lookup
+    call), and WhatsApp-style message timestamps (time-only for today, date +
+    time for older). The timestamp needed one small backend addition:
+    `IncomingChatMessage` (the live WebSocket envelope) gained a `sentAt`
+    field it didn't have before — `ChatWebSocketHandler.handleChatMessage`
+    now mints exactly ONE `Instant.now()` per message and shares it with both
+    the Kafka-persisted event and this live envelope, so a message's
+    live-delivered timestamp and its later history-read timestamp are always
+    identical, not two independent clock reads that could disagree by a few
+    milliseconds. `ConversationMessageResponse.sentAt` (history) already
+    existed from step 14 and needed no change.
+17. Split-pane chat layout + scroll-back pagination.
+    - **Split view: a parent route with a child outlet, not one component
+      managing both panels' state.** A new `ChatShellComponent` renders a
+      persistent sidebar (`UserListComponent`, reused essentially as-is) and
+      a `<router-outlet>` for the right panel; `app.routes.ts` nests
+      `chat/:userId` (rendering `ChatComponent`, also reused as-is) and an
+      empty-path placeholder route (`chat` with no id — "select a
+      conversation") as children of a `chat` parent route. Chosen over a
+      single fat component because it keeps `UserListComponent` and
+      `ChatComponent` as independent, mostly-unchanged classes (this pass's
+      explicit reuse goal) while preserving what routing already buys the
+      app for free: a specific open conversation stays a real, bookmarkable,
+      refreshable URL (`/chat/:userId`), consistent with how every other
+      screen in this app already works. The old standalone `/users` route
+      now redirects to `/chat` — the sidebar's presence there makes a
+      separate full-page user list redundant.
+      - **Load-bearing gotcha this surfaces**: Angular's default
+        `RouteReuseStrategy` reuses the same routed component instance when
+        only a URL param changes on the same route config — clicking a
+        different sidebar user does NOT destroy/recreate `ChatComponent`,
+        so `ngOnInit` (which used to read `recipientId` once from the route
+        snapshot and fetch history exactly once) does not re-run on switch.
+        Fixed by making `recipientId`/`recipientLabel`/history-loading all
+        reactive to `ActivatedRoute.paramMap` instead of a one-time
+        snapshot read, guarded by a monotonically increasing generation
+        counter so a slow, now-stale history response for a
+        since-abandoned user switch can't overwrite the newly selected
+        conversation's (already-cleared) bubble list.
+      - **Live-message ordering across a switch, accepted tradeoff**: the
+        WebSocket connection is now genuinely persistent across chat
+        switches (one connection for the whole login session, not
+        reconnected per conversation), so a live `incoming_message` for the
+        conversation being switched INTO can arrive during that
+        conversation's brief history-fetch round trip. Rather than
+        buffering live messages per-conversation (real complexity for a
+        narrow, sub-second window), a live append is simply gated on that
+        conversation's history having already loaded; a message arriving
+        in that gap is dropped from the LIVE view only — it's already
+        durably persisted via Kafka regardless, and self-heals the next
+        time that conversation is opened. Same "named, accepted, harmless,
+        self-healing" posture this project already uses elsewhere (e.g.
+        the reconnect-sweep's concurrent-double-sweep race, §4) rather than
+        building new machinery to close a window this narrow.
+    - **Pagination: see §4's `GET /conversations/{otherUserId}/messages`
+      entry for the cursor-vs-offset decision.** On the frontend,
+      `ChatComponent`'s message list fires a scroll handler that requests
+      the next page once the user scrolls within a small threshold of the
+      top, guarded against concurrent/repeated fetches and against firing
+      again once `hasMore` is false.
+      - **Scroll-position preservation on prepend**: naively prepending
+        older messages above the currently visible content, then leaving
+        `scrollTop` untouched, visually yanks the view down to the newly
+        taller top of the list — the user loses their place. Fixed with
+        the standard technique: capture the container's `scrollHeight`
+        (and `scrollTop`) immediately before the prepend, then once the
+        browser has actually laid out and painted the new content
+        (`requestAnimationFrame`, not a plain signal update or
+        `setTimeout(0)` — both can fire before layout/paint have caught
+        up), set `scrollTop = newScrollHeight - oldScrollHeight + oldScrollTop`.
+        That's exactly the height the content grew by, so the same pixels
+        the user was already looking at stay in view.
+      - **Bundled, closely-related fix**: initial history load now scrolls
+        the message list to the bottom once rendered. Previously (step 14)
+        a conversation with enough messages to overflow the container
+        opened scrolled to the TOP (the browser's default for a freshly
+        rendered scrollable div) rather than the most recent message —
+        harmless with short test conversations, but impossible to miss
+        once pagination makes 50+ message conversations the normal case
+        being tested here, so it's fixed as part of this same pass rather
+        than filed separately.

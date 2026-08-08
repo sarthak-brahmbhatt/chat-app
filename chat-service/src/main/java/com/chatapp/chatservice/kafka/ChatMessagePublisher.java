@@ -47,11 +47,19 @@ public class ChatMessagePublisher {
         this.kafkaTemplate = kafkaTemplate;
     }
 
-    public void publish(String senderId, ChatMessageRequest request) {
+    /**
+     * sentAt is minted ONCE by the caller (ChatWebSocketHandler.handleChatMessage)
+     * and passed in here, rather than this method calling Instant.now() itself
+     * - the same Instant also goes into the live incoming_message envelope
+     * (IncomingChatMessage), so the persisted timestamp and the one shown on
+     * the recipient's live-delivered bubble for the same message are always
+     * identical, not two independent clock reads a few milliseconds apart.
+     */
+    public void publish(String senderId, ChatMessageRequest request, Instant sentAt) {
         try {
             String key = conversationKey(senderId, request.recipientId());
             ChatMessageEvent event = new ChatMessageEvent(
-                    request.messageId(), senderId, request.recipientId(), request.content(), Instant.now());
+                    request.messageId(), senderId, request.recipientId(), request.content(), sentAt);
 
             kafkaTemplate.send(KafkaTopicConfig.CHAT_MESSAGES_TOPIC, key, event)
                     .whenComplete((result, exception) -> {

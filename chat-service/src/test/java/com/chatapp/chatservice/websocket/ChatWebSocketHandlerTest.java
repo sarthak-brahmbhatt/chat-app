@@ -29,6 +29,7 @@ import org.springframework.web.socket.WebSocketSession;
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -36,6 +37,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -96,7 +98,15 @@ class ChatWebSocketHandlerTest {
     void setUp() {
         JwtValidator jwtValidator = new JwtValidator(SECRET);
         connectionRegistry = new ConnectionRegistry();
-        objectMapper = new ObjectMapper();
+        // findAndRegisterModules() picks up JavaTimeModule (java.time.Instant
+        // support) from the classpath - matches what Spring Boot's own
+        // autoconfigured ObjectMapper bean does automatically in the real
+        // running app (which is why ConversationController's Instant fields
+        // already serialize correctly over real HTTP). A bare `new
+        // ObjectMapper()` here, without this, doesn't know how to (de)serialize
+        // IncomingChatMessage.sentAt and throws - this only ever affected this
+        // test's own local mapper, never the production bean.
+        objectMapper = new ObjectMapper().findAndRegisterModules();
 
         // Default stub: every publish "sends" into a future that NEVER
         // completes — deliberately, not an oversight. This is what a
@@ -209,7 +219,40 @@ class ChatWebSocketHandlerTest {
         ArgumentCaptor<TextMessage> recipientCaptor = ArgumentCaptor.forClass(TextMessage.class);
         verify(recipientSession).sendMessage(recipientCaptor.capture());
         IncomingChatMessage delivered = objectMapper.readValue(recipientCaptor.getValue().getPayload(), IncomingChatMessage.class);
-        assertThat(delivered).isEqualTo(new IncomingChatMessage("incoming_message", "m-1", "42", "hi there"));
+        // sentAt is a real Instant.now() minted inside handleChatMessage, not
+        // predictable exactly - asserted separately (non-null, close to now)
+        // rather than folded into an exact-equality check on the whole record.
+        assertThat(delivered.type()).isEqualTo("incoming_message");
+        assertThat(delivered.messageId()).isEqualTo("m-1");
+        assertThat(delivered.senderId()).isEqualTo("42");
+        assertThat(delivered.content()).isEqualTo("hi there");
+        assertThat(delivered.sentAt()).isCloseTo(Instant.now(), within(5, ChronoUnit.SECONDS));
+    }
+
+    @Test
+    void handleTextMessage_toConnectedRecipient_liveEnvelopeSentAtMatchesPersistedEventSentAt() throws Exception {
+        // The specific guarantee this test exists for: handleChatMessage mints
+        // ONE Instant and shares it with both the Kafka-published ChatMessageEvent
+        // (what gets persisted) and the live incoming_message envelope (what the
+        // recipient's screen shows) - not two independent Instant.now() calls
+        // that could disagree by a few milliseconds.
+        WebSocketSession recipientSession = authenticatedSession("99");
+        WebSocketSession senderSession = authenticatedSession("42");
+
+        String chatMessageJson = """
+                {"type":"message","messageId":"m-shared-ts","recipientId":"99","content":"hi there"}
+                """;
+        handler.handleTextMessage(senderSession, new TextMessage(chatMessageJson));
+
+        ArgumentCaptor<ChatTopicEvent> eventCaptor = ArgumentCaptor.forClass(ChatTopicEvent.class);
+        verify(kafkaTemplate).send(eq(KafkaTopicConfig.CHAT_MESSAGES_TOPIC), eq("42:99"), eventCaptor.capture());
+        ChatMessageEvent published = (ChatMessageEvent) eventCaptor.getValue();
+
+        ArgumentCaptor<TextMessage> recipientCaptor = ArgumentCaptor.forClass(TextMessage.class);
+        verify(recipientSession).sendMessage(recipientCaptor.capture());
+        IncomingChatMessage delivered = objectMapper.readValue(recipientCaptor.getValue().getPayload(), IncomingChatMessage.class);
+
+        assertThat(delivered.sentAt()).isEqualTo(published.sentAt());
     }
 
     @Test

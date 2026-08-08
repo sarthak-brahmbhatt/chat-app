@@ -1,30 +1,28 @@
-<div class="page">
-  <div style="display: flex; justify-content: space-between; align-items: center">
-    <h1>Users</h1>
-    <button class="secondary" (click)="logout()">Log out</button>
-  </div>
-
-  <!--
-    @if / @else if / @else — Angular's built-in control-flow syntax
-    (17+), compiled directly rather than requiring an NgIf directive import.
-  -->
-  @if (loading()) {
-    <p>Loading…</p>
-  } @else if (errorMessage()) {
-    <p class="error">{{ errorMessage() }}</p>
-  } @else if (users().length === 0) {
-    <p>No other users found.</p>
-  } @else {
-    <ul style="list-style: none; padding: 0">
-      <!-- @for requires a `track` expression — how Angular identifies which
-           DOM node corresponds to which item across re-renders, similar in
-           spirit to React's `key`. user.id is unique and stable, a natural fit. -->
-      @for (user of users(); track user.id) {
-        <li style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid #eee">
-          <span>{{ user.firstName }} {{ user.lastName }} ({{ user.username }})</span>
-          <button (click)="startChat(user)">Start Chat</button>
-        </li>
-      }
-    </ul>
-  }
+<div class="sidebar-header">
+  <h1>Users</h1>
+  <button class="secondary" (click)="logout()">Log out</button>
 </div>
+
+<!--
+  @if / @else if / @else — Angular's built-in control-flow syntax
+  (17+), compiled directly rather than requiring an NgIf directive import.
+-->
+@if (loading()) {
+  <p class="sidebar-status">Loading…</p>
+} @else if (errorMessage()) {
+  <p class="sidebar-status error">{{ errorMessage() }}</p>
+} @else if (users().length === 0) {
+  <p class="sidebar-status">No other users found.</p>
+} @else {
+  <ul class="user-list">
+    <!-- @for requires a `track` expression — how Angular identifies which
+         DOM node corresponds to which item across re-renders, similar in
+         spirit to React's `key`. user.id is unique and stable, a natural fit. -->
+    @for (user of users(); track user.id) {
+      <li class="user-list-item" [class.active]="isActive(user)">
+        <span>{{ user.firstName }} {{ user.lastName }} ({{ user.username }})</span>
+        <button (click)="startChat(user)">Start Chat</button>
+      </li>
+    }
+  </ul>
+}
