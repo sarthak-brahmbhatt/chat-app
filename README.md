@@ -46,6 +46,44 @@ flowchart LR
 is stateful (holds live WebSocket connections). They're split because they
 scale differently — see below.
 
+## AWS deployment
+
+```mermaid
+flowchart TB
+    DNS["Porkbun DNS\nsarthak-chat-app.beer"]
+    Browser["Browser"]
+
+    DNS -->|root + www| CF["CloudFront\n+ S3 (static Angular build)"]
+    DNS -->|api subdomain| ALB["Application Load Balancer\napi.sarthak-chat-app.beer"]
+    Browser --> CF
+    Browser --> ALB
+
+    ALB -->|target group| US["user-service\nsingle fixed EC2 instance"]
+    ALB -->|target group| CS["chat-service\nASG, min 1 / max 4"]
+
+    US --> DL[("Data layer EC2\nMySQL + Redis + Kafka\n(docker-compose, single instance)")]
+    CS --> DL
+
+    ECR[["ECR"]] -.->|pulled via IAM instance role| US
+    ECR -.->|pulled via IAM instance role| CS
+```
+
+- **VPC: public subnets only, no NAT Gateway** — Security Groups are the
+  access-control layer, not network isolation (a NAT Gateway bills a fixed
+  ~$32+/month whether used or not).
+- **Data layer is one non-scaled EC2 instance** running the same
+  docker-compose stack as local dev (MySQL + Redis + Kafka), not three
+  separate managed services — an accepted single point of failure,
+  consistent with this project's stated "minimize fixed recurring cost"
+  posture.
+- **Known, deliberately deferred gap**: the chat-service ASG can scale to 4
+  instances, but the Redis-backed cross-instance connection registry +
+  pub/sub needed to make live message routing actually correct *across*
+  multiple instances hasn't been built yet — `ConnectionRegistry` today is
+  in-memory and single-instance only. The ASG scales compute capacity today;
+  multi-instance correctness is explicit future work, not yet exercised in
+  production. Full reasoning: [CLAUDE.md §3.6](CLAUDE.md#36-scaling--infrastructure).
+
 ## Notable technical decisions
 
 Full reasoning for all of these (and more) lives in [`CLAUDE.md`](CLAUDE.md),
@@ -79,10 +117,6 @@ split out into [`docs/incidents.md`](docs/incidents.md).
   scroll-back message history — the access pattern is "page backward while
   new messages keep arriving at the live end," exactly where offset
   pagination silently skips/duplicates rows at a page boundary.
-- **No NAT Gateway; public subnets only.** A NAT Gateway bills a fixed
-  ~$32+/month whether used or not — an explicit cost tradeoff for a
-  timeboxed learning project, with Security Groups (not network isolation)
-  as the actual access-control layer.
 
 ## Local setup
 
