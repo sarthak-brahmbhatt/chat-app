@@ -598,13 +598,20 @@ Resources:
             mkdir -p /opt/chat-app-data/mysql-init
             cd /opt/chat-app-data
 
-            # Byte-identical to this repo's own mysql-init/01-init-databases.sql
-            # - creates the two empty databases; Hibernate's ddl-auto:update
+            # Same content as this repo's own mysql-init/01-init-databases.sql
+            # - creates the one empty database; Hibernate's ddl-auto:update
             # (see each service's application.yml) creates the actual
             # tables on first boot, same as local dev.
+            #
+            # Build-order step 18 replaced the userdb/messagedb pair with a
+            # single chatappdb (see that file for why). Kept in sync here even
+            # though the bot feature itself is local-Docker-only and AWS is
+            # currently torn down: a stack brought up with the OLD database
+            # names would fail in a way that points at nothing - both services
+            # would start, then fail every query against a database that was
+            # never created.
             cat > mysql-init/01-init-databases.sql <<'SQL'
-            CREATE DATABASE IF NOT EXISTS userdb;
-            CREATE DATABASE IF NOT EXISTS messagedb;
+            CREATE DATABASE IF NOT EXISTS chatappdb;
             SQL
 
             # docker-compose.yml: the data layer only (mysql + redis +

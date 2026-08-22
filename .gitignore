@@ -34,3 +34,11 @@ load-test/k6-run.log
 # The whole directory is ignored, not one filename, so a second stack's
 # params file can't be committed by accident later.
 cloudformation/.params/
+
+# Docker Compose automatically reads this file from the project root and uses it
+# to substitute ${...} in docker-compose.yml — it is how the real OPENAI_API_KEY
+# reaches chat-service without ever being committed (CLAUDE.md 3.9). Same
+# reasoning as .env.aws.local above: docker-compose.yml's dev-only JWT secret is
+# deliberately fake and committed, a billable OpenAI credential is neither.
+# .env.example IS committed, as the template to copy.
+.env

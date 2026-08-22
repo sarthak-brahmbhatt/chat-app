@@ -2,7 +2,14 @@ spring:
   application:
     name: user-service
 
-  # --- MySQL connection: the User DB (CLAUDE.md 3.5) ---
+  # --- MySQL connection: chatappdb (CLAUDE.md 3.5) ---
+  #
+  # Was `userdb` until build-order step 18 consolidated userdb + messagedb into a
+  # single `chatappdb`. Nothing about user-service's own tables changed — it still
+  # owns `users` and is still the only service that writes to it. What changed is
+  # that chat-service now READS `users` out of this same database (to spot a
+  # user_type = BOT recipient), which the old split made impossible in SQL. See
+  # mysql-init/01-init-databases.sql for the reasoning and the tradeoff accepted.
   #
   # Every value below uses Spring's ${VAR_NAME:default} property placeholder syntax:
   # if the environment variable VAR_NAME is set, its value wins; otherwise the text
@@ -26,7 +33,7 @@ spring:
   # a second application-docker.yml / Spring profile, since there's nothing else
   # about the config that differs between the two contexts.
   datasource:
-    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/userdb
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/chatappdb
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:root}
 
@@ -79,6 +86,17 @@ jwt:
 # app where 30+ day silent sessions are common for retention reasons.
 refresh-token:
   expiration-days: ${REFRESH_TOKEN_EXPIRATION_DAYS:7}
+
+# --- The seeded DoctorAssistant bot user (CLAUDE.md 3.9, build-order step 18) ---
+# user-service OWNS the `users` table, so it is the service that creates the bot's
+# row (BotUserSeeder) — it already has the PasswordEncoder needed to bcrypt the
+# unusable random password that NOT NULL column demands. chat-service only ever
+# READS this row. The username lives in config in BOTH services rather than as a
+# constant in each, so the two can't silently drift; a mismatch would present as
+# "the bot never answers" with nothing pointing at the real cause.
+bot:
+  username: ${BOT_USERNAME:doctorassistant}
+  display-name: ${BOT_DISPLAY_NAME:DoctorAssistant}
 
 server:
   port: 8080
