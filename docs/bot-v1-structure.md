@@ -173,12 +173,29 @@ which is what makes double-booking impossible even if two requests race.
 docker compose --profile tools up -d adminer
 ```
 
-Then <http://localhost:8083> — System `MySQL`, Server `mysql`, Username `root`,
-Password `root`, Database `chatappdb`.
+Then open this URL rather than the bare one — it preselects every field except
+the password:
+
+<http://localhost:8083/?server=mysql&username=root&db=chatappdb>
+
+Password is `root`.
+
+**Get the System dropdown right.** Adminer's query string encodes the driver as
+the parameter NAME, so `?server=mysql` means "driver `server` (MySQL/MariaDB),
+host `mysql`" — which is why the link above works and a bare
+`http://localhost:8083` may not. Left on **MS SQL**, Adminer connects through
+FreeTDS and fails with `SQLSTATE[HY000] Unable to connect: TDS server is
+unavailable or does not exist (mysql)`. That error is about the DRIVER, not the
+database — the database is fine.
 
 It sits behind a `tools` profile so a plain `docker compose up` does not start
 it: it is a debugging tool, not part of the application, and it must not be in
 the stack whose connection capacity the load test measures.
+
+If `--profile tools up` fails with a container-name conflict, an Adminer
+started by hand outside Compose already holds the name. Either keep using that
+one (same URL shape, its own port) or drop it first:
+`docker rm -f chat-app-adminer`.
 
 **Straight from the CLI**, if that is quicker:
 

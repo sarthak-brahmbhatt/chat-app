@@ -196,8 +196,13 @@ default stack:
 docker compose --profile tools up -d adminer
 ```
 
-Then <http://localhost:8083> — System `MySQL`, Server `mysql`, Username `root`,
-Password `root`, Database `chatappdb`.
+Then open <http://localhost:8083/?server=mysql&username=root&db=chatappdb>,
+which preselects everything but the password (`root`).
+
+Use that link rather than the bare URL: Adminer encodes the driver as the query
+parameter's *name*, so `?server=` selects MySQL. Left on **MS SQL** the login
+fails with `TDS server is unavailable`, which is a driver error, not a database
+one.
 
 [`docs/bot-v1-structure.md`](docs/bot-v1-structure.md) maps the schema, says
 where each piece of bot logic lives, and lists what is still outstanding.
