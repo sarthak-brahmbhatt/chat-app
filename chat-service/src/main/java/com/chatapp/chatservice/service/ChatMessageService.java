@@ -10,6 +10,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -128,6 +129,48 @@ public class ChatMessageService {
      * sweepUndeliveredForRecipient's own comment for why that's accepted,
      * not locked against.
      */
+    /**
+     * Writes one message of a bot conversation straight to the database,
+     * deliberately bypassing Kafka (CLAUDE.md 3.9 §5.3).
+     *
+     * <p>Kafka sits in the normal path (CLAUDE.md 3.4) to decouple "tell the
+     * sender we got it" from "durably write it", so a slow or briefly failing
+     * database never surfaces to the sender as a failed message. That reasoning
+     * does not transfer here, and following it anyway would actively break
+     * things. The bot has to READ its own conversation state and write an
+     * appointment inside the same turn; an asynchronous insert that may land
+     * after the reply has already been sent gives the next turn a conversation
+     * whose history is missing the message it is answering.
+     *
+     * <p>Both directions of a bot conversation go through here — the user's
+     * message and the bot's reply — so history and the audit trail look exactly
+     * like a human conversation's, which is what lets
+     * {@code GET /conversations/{id}/messages} stay completely unaware that a
+     * bot exists.
+     *
+     * <p>The tradeoff being accepted: a database failure during a bot turn IS
+     * visible to the user, as an apology instead of a reply. That is the honest
+     * outcome, since without a persisted turn the bot could not have answered
+     * coherently anyway.
+     *
+     * @param delivered whether to write the row already marked delivered — true
+     *                  for a message TO the bot, which has no browser to send a
+     *                  delivered_ack but has plainly received it; false for a
+     *                  message FROM the bot, whose double tick arrives the
+     *                  ordinary way when the user's client acks it
+     */
+    @Transactional
+    public ChatMessage persistBotConversationMessage(
+            String messageId, String senderId, String recipientId, String content, Instant sentAt, boolean delivered) {
+        ChatMessage message = new ChatMessage(messageId, senderId, recipientId, content, sentAt);
+        if (delivered) {
+            message.markDelivered();
+        }
+        ChatMessage saved = chatMessageRepository.save(message);
+        log.debug("Persisted bot-conversation message {} ({} -> {})", messageId, senderId, recipientId);
+        return saved;
+    }
+
     public void markDelivered(String messageId) {
         int rowsUpdated = chatMessageRepository.markDelivered(messageId);
         if (rowsUpdated == 0) {

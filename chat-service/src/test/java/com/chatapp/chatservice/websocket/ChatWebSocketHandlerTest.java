@@ -1,5 +1,7 @@
 package com.chatapp.chatservice.websocket;
 
+import com.chatapp.chatservice.bot.BotDirectory;
+import com.chatapp.chatservice.bot.DoctorAssistantBotService;
 import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
@@ -92,6 +94,12 @@ class ChatWebSocketHandlerTest {
     @Mock
     private ChatMessageService chatMessageService;
 
+    @Mock
+    private BotDirectory botDirectory;
+
+    @Mock
+    private DoctorAssistantBotService doctorAssistantBotService;
+
     private Map<String, Object> sessionAttributes;
 
     @BeforeEach
@@ -129,9 +137,17 @@ class ChatWebSocketHandlerTest {
         // sweep itself is what's being tested.
         lenient().when(chatMessageService.sweepUndeliveredForRecipient(anyString())).thenReturn(List.of());
 
+        // Default stub: nobody is the bot. Every test in this class predates the
+        // bot and is about the human-to-human path, so the routing branch added
+        // in build-order step 18 must not fire in any of them — this default is
+        // what keeps them all testing what they were written to test. The bot's
+        // own behaviour is covered separately in BotRoutingTest.
+        lenient().when(botDirectory.isBot(anyString())).thenReturn(false);
+
         ChatMessagePublisher chatMessagePublisher = new ChatMessagePublisher(kafkaTemplate);
         handler = new ChatWebSocketHandler(
-                jwtValidator, connectionRegistry, objectMapper, chatMessagePublisher, chatMessageService);
+                jwtValidator, connectionRegistry, objectMapper, chatMessagePublisher, chatMessageService,
+                botDirectory, doctorAssistantBotService);
 
         sessionAttributes = new HashMap<>();
         // lenient(): not every test in this class uses the shared `session`

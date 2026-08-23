@@ -25,6 +25,14 @@ plugins {
 group = 'com.chatapp'
 version = '0.0.1-SNAPSHOT'
 
+// Overrides the Jackson version Spring Boot 3.3.4's BOM pins (2.17.x) up to the
+// one the OpenAI SDK is built and tested against. Spring Boot's
+// dependency-management plugin would otherwise win the conflict and silently
+// DOWNGRADE Jackson underneath the SDK, which is the kind of mismatch that
+// compiles cleanly and then fails at runtime deep inside response deserialization.
+// Spring Boot 3.4 ships 2.18 itself, so this is a small step forward, not a fork.
+ext['jackson-bom.version'] = '2.18.9'
+
 // Pins the JDK used to compile/run this module. Using a toolchain (vs. a bare
 // sourceCompatibility string) lets Gradle auto-provision JDK 21 if it isn't already
 // the machine's default.
@@ -75,6 +83,22 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     runtimeOnly 'com.mysql:mysql-connector-j'
 
+    // --- DoctorAssistant bot: OpenAI Responses API (CLAUDE.md 3.9, build-order
+    // step 18) ---
+    // The official OpenAI Java SDK, called directly. Spring AI is deliberately
+    // NOT used: it would abstract the provider behind its own model, and this
+    // project's stated purpose is hands-on visibility into the mechanics — the
+    // same reasoning that chose Kafka over a managed queue (3.4) and EC2+ASG
+    // over ECS/Fargate (3.8). The cost of that choice is named in the design's
+    // out-of-scope list: swapping to Bedrock later is real rewrite work against
+    // SDK-specific classes, not a config change.
+    //
+    // Brings okhttp and the Kotlin stdlib along transitively — the SDK is
+    // written in Kotlin. That is the price of the official client; the
+    // alternative is hand-rolling the HTTP calls and the JSON schema generation
+    // that makes structured outputs work.
+    implementation 'com.openai:openai-java:4.52.0'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 
     // --- Test scope: @EmbeddedKafka spins up a real, temporary, in-process Kafka
@@ -83,6 +107,21 @@ dependencies {
     // (topic name, (de)serializers, trusted packages, consumer group) genuinely
     // works, rather than just asserting against mocks of Spring Kafka's own classes.
     testImplementation 'org.springframework.kafka:spring-kafka-test'
+
+    // --- Test scope: an in-memory database for @DataJpaTest ---
+    // Added for AvailabilityServiceTest specifically. §4's availability
+    // subtraction is a single JPQL query joining three tables, and it is the one
+    // piece of this feature where a mock-based test would assert nothing at all:
+    // mocking the repository just asserts that the mock returns what it was told
+    // to. Running it against a real database engine is what actually proves the
+    // entity join, the NOT EXISTS, the enum parameters and the constructor
+    // projection do what they claim.
+    //
+    // H2 rather than Testcontainers/MySQL: this test is about the query's LOGIC,
+    // which is plain JPQL with nothing MySQL-specific in it, and H2 keeps
+    // `./gradlew test` runnable with no Docker daemon — the same property
+    // @EmbeddedKafka already buys the Kafka tests above.
+    testRuntimeOnly 'com.h2database:h2'
 }
 
 // JUnit 5 (Jupiter) is what spring-boot-starter-test ships; without this line Gradle

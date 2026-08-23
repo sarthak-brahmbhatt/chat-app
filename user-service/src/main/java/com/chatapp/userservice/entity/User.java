@@ -2,6 +2,8 @@ package com.chatapp.userservice.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -54,16 +56,48 @@ public class User {
     @Column
     private String lastName;
 
+    // Human user or bot (CLAUDE.md 3.9, build-order step 18). chat-service reads
+    // this exact column out of the now-shared chatappdb to decide whether an
+    // outgoing message goes to a live WebSocket session or to the bot service —
+    // it is the single flag the whole routing branch turns on.
+    //
+    // EnumType.STRING, not the default ORDINAL: ordinal stores 0/1, so inserting a
+    // constant anywhere but the end of UserType would silently reinterpret every
+    // existing row. The stored value is also then readable in a plain SQL client,
+    // which matters for a column people will hand-query while debugging the bot.
+    //
+    // columnDefinition spells out the DDL rather than letting Hibernate infer it,
+    // purely for the DEFAULT: Hibernate's ddl-auto:update would otherwise emit a
+    // bare `not null` with no default, and that is the difference between this
+    // column being addable to a table that already has rows and not.
+    @Enumerated(EnumType.STRING)
+    @Column(name = "user_type", nullable = false, length = 20,
+            columnDefinition = "VARCHAR(20) NOT NULL DEFAULT 'USER'")
+    private UserType userType = UserType.USER;
+
     // JPA requires a no-arg constructor (it builds the object via reflection, then
     // sets fields itself — no constructor args involved).
     protected User() {
     }
 
+    /** Registers a normal human user — the only path {@code POST /register} uses. */
     public User(String username, String password, String firstName, String lastName) {
+        this(username, password, firstName, lastName, UserType.USER);
+    }
+
+    /**
+     * The explicit-type constructor. Separate from the 4-arg one above so that
+     * creating a non-USER row is always a deliberate act at the call site
+     * (currently only BotUserSeeder) rather than something an extra argument
+     * could be passed by accident — registration cannot reach this overload
+     * without naming the type it wants.
+     */
+    public User(String username, String password, String firstName, String lastName, UserType userType) {
         this.username = username;
         this.password = password;
         this.firstName = firstName;
         this.lastName = lastName;
+        this.userType = userType;
     }
 
     public Long getId() {
@@ -84,5 +118,9 @@ public class User {
 
     public String getLastName() {
         return lastName;
+    }
+
+    public UserType getUserType() {
+        return userType;
     }
 }

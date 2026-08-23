@@ -1,5 +1,8 @@
 package com.chatapp.chatservice.websocket;
 
+import com.chatapp.chatservice.bot.BotDirectory;
+import com.chatapp.chatservice.bot.BotReply;
+import com.chatapp.chatservice.bot.DoctorAssistantBotService;
 import com.chatapp.chatservice.dto.ChatMessageRequest;
 import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
@@ -75,18 +78,24 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final ObjectMapper objectMapper;
     private final ChatMessagePublisher chatMessagePublisher;
     private final ChatMessageService chatMessageService;
+    private final BotDirectory botDirectory;
+    private final DoctorAssistantBotService doctorAssistantBotService;
 
     public ChatWebSocketHandler(
             JwtValidator jwtValidator,
             ConnectionRegistry connectionRegistry,
             ObjectMapper objectMapper,
             ChatMessagePublisher chatMessagePublisher,
-            ChatMessageService chatMessageService) {
+            ChatMessageService chatMessageService,
+            BotDirectory botDirectory,
+            DoctorAssistantBotService doctorAssistantBotService) {
         this.jwtValidator = jwtValidator;
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
         this.chatMessagePublisher = chatMessagePublisher;
         this.chatMessageService = chatMessageService;
+        this.botDirectory = botDirectory;
+        this.doctorAssistantBotService = doctorAssistantBotService;
     }
 
     @Override
@@ -219,8 +228,73 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         Instant sentAt = Instant.now();
 
         sendSingleTickAck(session, request.messageId());
+
+        // The bot branch (CLAUDE.md 3.9 §5.2). Everything above this line is
+        // identical for a bot and a human recipient — same envelope, same
+        // validation, same single tick — because the bot is a real `users` row,
+        // not a special case bolted onto the protocol. Only the DELIVERY differs,
+        // and it has to: a ConnectionRegistry lookup for the bot can only ever
+        // miss, since the bot has no browser and therefore no session.
+        if (botDirectory.isBot(request.recipientId())) {
+            handleBotMessage(session, senderId, request, sentAt);
+            return;
+        }
+
         chatMessagePublisher.publish(senderId, request, sentAt);
         deliverIfRecipientConnected(senderId, request, sentAt);
+    }
+
+    /**
+     * Runs one bot turn and sends the reply back down the SAME socket the user
+     * sent on (CLAUDE.md 3.9 §5.3).
+     *
+     * <p>Kafka is bypassed in both directions here, and that is the point of
+     * §5.3's direct writes: Kafka exists to decouple acknowledging a message from
+     * durably storing it (CLAUDE.md 3.4), which is worth doing when the recipient
+     * might be offline. The bot is never offline, and it has to read the
+     * conversation it is part of within the same turn — an insert that lands
+     * asynchronously, possibly after the reply, would leave the next turn's
+     * history missing the message it answers.
+     *
+     * <p>Runs INLINE on the WebSocket's inbound thread, so this user's socket
+     * processes nothing else until the model answers (bounded by
+     * openai.timeout-seconds). Deliberate for Version 1: it keeps the turn
+     * strictly ordered — no chance of two overlapping calls chaining off the same
+     * previous_response_id and interleaving — and one parked thread per user
+     * mid-conversation is nothing against the connection ceiling measured in
+     * CLAUDE.md 3.6. Moving this to an executor is where to start if bot
+     * conversations ever get concurrent enough to matter, and it would need its
+     * own answer for that ordering question.
+     */
+    private void handleBotMessage(
+            WebSocketSession session, String senderId, ChatMessageRequest request, Instant sentAt) throws IOException {
+        String botId = request.recipientId();
+
+        // The user's message is already delivered the instant the bot has it, so
+        // the double tick is sent here rather than waiting for a delivered_ack
+        // that no browser will ever send. Sent BEFORE the model call, not after:
+        // it is true as soon as the message arrives, and holding it back would
+        // leave the user watching a single tick for the length of an API call.
+        sendDoubleTickIfConnected(senderId, request.messageId());
+
+        BotReply reply = doctorAssistantBotService.handleUserMessage(
+                senderId, botId, request.messageId(), request.content(), sentAt);
+
+        // A second, independent timestamp — the reply genuinely happened later
+        // than the question, and sharing the user message's Instant would render
+        // the two bubbles as simultaneous.
+        Instant repliedAt = Instant.now();
+        chatMessageService.persistBotConversationMessage(
+                reply.messageId(), botId, senderId, reply.content(), repliedAt, false);
+
+        // Sent as an ordinary incoming_message, from the bot's user id. The
+        // frontend has no bot-specific code at all: it renders this like any
+        // other message and auto-acks it, and that delivered_ack takes the normal
+        // path — which is what makes the bot's reply reach double tick the same
+        // way a human's does.
+        IncomingChatMessage incoming = new IncomingChatMessage(
+                "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
+        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
     }
 
     private void sendSingleTickAck(WebSocketSession session, String messageId) throws IOException {
