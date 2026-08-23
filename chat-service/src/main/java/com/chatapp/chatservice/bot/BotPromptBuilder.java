@@ -7,7 +7,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Renders the system prompt — the clinic's rules plus its entire dataset — for
@@ -35,8 +38,34 @@ public class BotPromptBuilder {
         this.clinicName = clinicName;
     }
 
-    public String systemPrompt(ClinicSnapshot snapshot) {
-        return rules(snapshot) + "\n\n" + data(snapshot);
+    /**
+     * @param firstTurn whether this is the opening message of the conversation.
+     *                  Passed in rather than inferred, because the model cannot
+     *                  tell: with no {@code previous_response_id} it simply sees
+     *                  no history, which is not the same as knowing it is turn
+     *                  one — in testing it opened with the welcome sometimes and
+     *                  skipped it other times. The caller knows for certain.
+     */
+    public String systemPrompt(ClinicSnapshot snapshot, boolean firstTurn) {
+        return rules(snapshot, firstTurn) + "\n\n" + data(snapshot);
+    }
+
+    /**
+     * Collapses the whitespace a text block's line continuations leave behind.
+     *
+     * <p>Every {@code \}-continued line in {@link #rules} keeps the two extra
+     * spaces it is indented by past the block's common margin, so a rule written
+     * across three source lines renders with a stray run of spaces at each join.
+     * A model reads through that fine, but it is noise in the logs, it is
+     * needless tokens on every single turn, and it makes any assertion about the
+     * prompt text depend on where the source happened to wrap.
+     *
+     * <p>Only runs that FOLLOW a non-space character are collapsed, which is what
+     * makes this safe: leading indentation is what distinguishes a nested list
+     * item from a top-level one, and it is untouched.
+     */
+    private static String collapseContinuationGaps(String text) {
+        return text.replaceAll("(?<=\\S) {2,}", " ");
     }
 
     /**
@@ -49,8 +78,10 @@ public class BotPromptBuilder {
      * who says "yes, sounds good" invites booking something never actually
      * agreed on.
      */
-    private String rules(ClinicSnapshot snapshot) {
-        return """
+    private String rules(ClinicSnapshot snapshot, boolean firstTurn) {
+        String template = """
+                %s
+
                 You are the appointment assistant for %s. You help patients find and book \
                 appointments with the clinic's doctors. Be warm, brief and practical — this is \
                 a chat window, so write two or three sentences, not paragraphs.
@@ -61,28 +92,42 @@ public class BotPromptBuilder {
                 You cannot look anything else up. Never invent a doctor, a specialty, a time \
                 slot or an availability_id that does not appear below.
 
-                SPECIALTIES
-                - The SPECIALTIES OFFERED list below is exhaustive. It is the complete set of \
+                FINDING A DOCTOR
+                - The SPECIALTIES OFFERED list below is exhaustive — it is the complete set of \
                   specialties this clinic has.
                 - When a patient describes symptoms, map them to the most appropriate specialty \
-                  FROM THAT LIST, then offer the doctors who practise it.
-                - If the specialty a patient needs is not on that list, say so plainly and \
-                  directly — for example "I'm sorry, we don't have a dermatologist at %s." \
-                  Do not offer a doctor from a different specialty as a substitute, do not \
-                  suggest they might help anyway, and do not offer to book anything. Say what \
-                  the clinic does offer only if the patient asks.
+                  FROM THAT LIST. Name the specialty back to them, then LIST EVERY DOCTOR the \
+                  clinic has in it, by name, and ask which one they would like to see. Do not \
+                  pick one for them and do not offer times yet. If there is only one doctor in \
+                  that specialty, name them and carry on.
+                - If the patient names a doctor themselves, go straight to that doctor.
+                - If they later change their mind and ask about a DIFFERENT doctor, follow them \
+                  — check that doctor and answer about them. Do not re-ask what they already \
+                  told you.
 
-                WORKING OUT WHAT IS FREE
+                OFFERING TIMES
+                - Once a doctor is settled, if the patient has not said when they want to come, \
+                  ask: what date and time would they like?
                 - A slot is free if it appears in WEEKLY WORKING PATTERN and there is no row in \
                   ALREADY BOOKED for that same availability_id on that same date.
                 - The working pattern RECURS every week. A row for MONDAY means every Monday, \
-                  not one specific Monday. Use the UPCOMING DATES list to turn a weekday into a \
-                  real date — do not calculate dates yourself.
-                - Never offer a time in the past. Check it against today's date and the current \
-                  time below.
-                - When the slot a patient asks for is taken, say so and immediately offer \
-                  something concrete: another time with the same doctor, or another doctor of \
-                  the same specialty. Do not just report the failure.
+                  not one specific Monday. Use the UPCOMING DATES list to turn "today", \
+                  "tomorrow" or a weekday into a real date — never calculate a date yourself.
+                - Never offer a time in the past. Check against today's date and current time.
+                - BEFORE you say a doctor is available on a given day, check the WORKS line for \
+                  that doctor below. If that weekday is not on their WORKS line, they DO NOT \
+                  work that day at all — say so plainly and offer their next working day \
+                  instead, or another doctor of the same specialty who does work that day. \
+                  Never tell a patient a doctor is available on a day they do not work.
+                - If the exact time they asked for is not free, say so and IMMEDIATELY offer a \
+                  specific alternative in the same message — never just report the failure. \
+                  Name a real time. Prefer, in this order:
+                  1. another time with the SAME doctor on the SAME day — the closest one \
+                     AFTER the time they asked for, falling back to the closest before it
+                  2. the same doctor on their next working day
+                  3. a different doctor of the same specialty
+                  For example: "Sorry, Dr. Mehta isn't free at 10:00. He has 11:00 that \
+                  morning — would that work?"
 
                 BOOKING — this takes exactly two turns, never one
                 - Turn A, the patient SELECTS a time ("9am please", "the 2:30 one", "Tuesday \
@@ -108,13 +153,32 @@ public class BotPromptBuilder {
                   before it is confirmed. Write reply_to_user as a confirmation anyway — if the \
                   check fails, the patient is told separately and your message is not sent.
 
+                WHEN WE CANNOT HELP
+                - If the specialty a patient needs is NOT in the list below, tell them which \
+                  specialty they need, say plainly that the clinic does not have one, and then \
+                  ask whether there is anything else you can help with. For example: "You'd \
+                  need to see a dermatologist for that. I'm sorry, we don't have a \
+                  dermatologist at %s. Is there anything else I could help you with?"
+                - Never substitute a doctor from a different specialty, never suggest one might \
+                  help anyway, and never offer to book with one.
+                - If the patient then says no, or that they are done, close warmly and stop \
+                  offering things: "Thank you for contacting %s. Have a good day!"
+
                 STAYING ON TOPIC
                 - You only handle appointments at %s. If asked about anything else — medical \
                   advice, diagnoses, prescriptions, test results, billing — say that is not \
                   something you can help with and steer back to booking.
                 - Never give medical advice. Mapping symptoms to the right specialty is \
                   routing, not diagnosis; do not go further than that.
-                """.formatted(clinicName, clinicName, clinicName);
+                """.formatted(
+                firstTurn
+                        ? "THIS IS THE FIRST MESSAGE OF THIS CONVERSATION. Your reply MUST begin with "
+                          + "exactly: \"Hello and welcome to " + clinicName + ".\" Then continue, in the same "
+                          + "message, with your answer to what they asked. Do not skip the greeting."
+                        : "This conversation is already under way. Do NOT greet or welcome them "
+                          + "again — carry straight on from where you left off.",
+                clinicName, clinicName, clinicName, clinicName);
+        return collapseContinuationGaps(template);
     }
 
     /** §6.1's stuffed dataset. */
@@ -145,6 +209,20 @@ public class BotPromptBuilder {
                 ? "(none)\n"
                 : String.join(", ", snapshot.specialties()) + "\n");
 
+        // Each doctor's working weekdays, collapsed onto one line beside them.
+        // Strictly redundant — it is derivable from WEEKLY WORKING PATTERN below —
+        // but derivable is not the same as reliably derived: asked "is Dr. Mehta
+        // free today?", a model scanning three dozen pattern rows for an absent
+        // weekday answered "yes, he is available today" for a Sunday he does not
+        // work. Absence is exactly what scanning misses. Stating the working days
+        // positively turns that inference into a lookup, for a handful of tokens.
+        Map<Long, String> workingDaysByDoctor = snapshot.pattern().stream().collect(Collectors.groupingBy(
+                DoctorAvailability::getDoctorId,
+                LinkedHashMap::new,
+                Collectors.collectingAndThen(
+                        Collectors.mapping(a -> a.getDayOfWeek().name(), Collectors.toCollection(LinkedHashSet::new)),
+                        days -> String.join(", ", days))));
+
         out.append("\n=== DOCTORS ===\n");
         if (snapshot.doctors().isEmpty()) {
             out.append("(none)\n");
@@ -153,6 +231,8 @@ public class BotPromptBuilder {
                 out.append("doctor_id=").append(d.getId())
                         .append(" | ").append(d.getName())
                         .append(" | ").append(d.getSpecialty())
+                        .append(" | WORKS: ")
+                        .append(workingDaysByDoctor.getOrDefault(d.getId(), "(no working days configured)"))
                         .append('\n');
             }
         }

@@ -24,6 +24,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -80,7 +81,7 @@ class DoctorAssistantBotServiceTest {
                 conversationStateRepository, tokenUsageRepository, fixed);
 
         lenient().when(clinicDataProvider.snapshot()).thenReturn(snapshotWithDoctors());
-        lenient().when(promptBuilder.systemPrompt(any())).thenReturn("SYSTEM PROMPT");
+        lenient().when(promptBuilder.systemPrompt(any(), anyBoolean())).thenReturn("SYSTEM PROMPT");
         lenient().when(conversationStateRepository.findByConversationKey(anyString())).thenReturn(Optional.empty());
         lenient().when(tokenUsageRepository.countByConversationKey(anyString())).thenReturn(0L);
     }

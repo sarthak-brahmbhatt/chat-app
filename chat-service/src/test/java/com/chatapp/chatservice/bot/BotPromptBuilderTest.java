@@ -29,7 +29,7 @@ class BotPromptBuilderTest {
 
     @Test
     void specialtiesAreListedAsAClosedSet() {
-        String prompt = builder.systemPrompt(snapshot(List.of("Cardiology", "Orthopedic")));
+        String prompt = builder.systemPrompt(snapshot(List.of("Cardiology", "Orthopedic")), true);
 
         // The closed list plus the instruction never to leave it is the entire
         // mechanism behind "sorry, we have no dermatologist" — without it a model
@@ -42,7 +42,7 @@ class BotPromptBuilderTest {
 
     @Test
     void everyBookableSlotCarriesTheIdTheModelMustEchoBack() {
-        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")));
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
 
         // §6.3 has the model return an availability_id verbatim. If the id is not
         // in the prompt beside the slot, there is nothing correct for it to
@@ -53,7 +53,7 @@ class BotPromptBuilderTest {
 
     @Test
     void todayAndTheUpcomingDatesAreSpelledOut() {
-        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")));
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
 
         // The model has neither a clock nor a calendar. Both have to be given, or
         // "next Tuesday" resolves to a confident and frequently wrong date.
@@ -68,7 +68,7 @@ class BotPromptBuilderTest {
         Appointment booked = new Appointment(
                 1L, 11L, MONDAY, LocalTime.of(9, 0), LocalTime.of(9, 30), 42L, Instant.now());
 
-        String prompt = builder.systemPrompt(snapshotWith(List.of(booked)));
+        String prompt = builder.systemPrompt(snapshotWith(List.of(booked)), true);
 
         assertThat(prompt).contains("ALREADY BOOKED");
         assertThat(prompt).contains("2026-08-24 | availability_id=11");
@@ -76,7 +76,7 @@ class BotPromptBuilderTest {
 
     @Test
     void anEmptyBookingListSaysSoRatherThanShowingNothing() {
-        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")));
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
 
         // An empty heading reads as missing data, and a model that thinks the
         // booking list is missing hedges instead of offering the slot.
@@ -85,7 +85,7 @@ class BotPromptBuilderTest {
 
     @Test
     void theHorizonIsStatedSoFarFutureSlotsAreNotOfferedBlindly() {
-        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")));
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
 
         // Bookings are only loaded up to the horizon, so beyond it the absence of
         // a booking proves nothing.
@@ -94,7 +94,7 @@ class BotPromptBuilderTest {
 
     @Test
     void bookingIsSpelledOutAsTwoTurns() {
-        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")));
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
 
         // Found in live testing: told only "BOOK once the patient has agreed to a
         // slot you offered", the model books on "9am please" — picking from a
@@ -108,7 +108,7 @@ class BotPromptBuilderTest {
 
     @Test
     void theReplyTextIsRequiredToMatchTheAction() {
-        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")));
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
 
         // The same live failure produced "I've scheduled your appointment...
         // Please confirm if this works for you!" on a NONE turn — a booking
@@ -118,8 +118,67 @@ class BotPromptBuilderTest {
     }
 
     @Test
+    void theThreeSampleConversationsAreEachAddressed() {
+        // docs/bot-requirements.md lists three conversations as the target
+        // behaviour. Each needs a rule the model can actually follow, and each of
+        // these was a real gap found by replaying the samples against the bot.
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
+
+        // (i) named doctor, no time given -> ask for one; requested time taken ->
+        // name a concrete alternative rather than just reporting the failure.
+        assertThat(prompt).contains("what date and time would they like");
+        assertThat(prompt).contains("IMMEDIATELY offer a specific alternative");
+
+        // (ii) specialty not offered -> say so, offer nothing else, then ask if
+        // there is anything else, then sign off.
+        assertThat(prompt).contains("Is there anything else I could help you with?");
+        assertThat(prompt).contains("Have a good day!");
+
+        // (iii) symptoms -> specialty -> list EVERY doctor in it and let the
+        // patient choose, rather than picking one for them.
+        assertThat(prompt).contains("LIST EVERY DOCTOR");
+        assertThat(prompt).contains("Do not pick one for them");
+    }
+
+    @Test
+    void theFirstTurnIsToldToWelcome_andLaterTurnsAreToldNotTo() {
+        // Every sample conversation starts "Hello and welcome to the Super
+        // Clinic". The bot cannot speak first in a chat window, so the welcome
+        // rides on its first reply instead.
+        //
+        // Told as a fact rather than left to the model: with no
+        // previous_response_id it merely sees no history, which is not the same
+        // as knowing it is turn one. In live testing it welcomed on some first
+        // turns and skipped it on others.
+        String first = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
+        // Asserted as the very FIRST line, not merely present: the same
+        // instruction sat in a mid-prompt "OPENING" section and was followed on
+        // some first turns and ignored on others, losing to the dozen rules
+        // after it. Position is the fix, so position is what the test pins.
+        assertThat(first).startsWith("THIS IS THE FIRST MESSAGE OF THIS CONVERSATION.");
+        assertThat(first).contains("Hello and welcome to Super Clinic.");
+
+        String later = builder.systemPrompt(snapshot(List.of("Orthopedic")), false);
+        assertThat(later).contains("already under way");
+        assertThat(later).contains("Do NOT greet or welcome them again");
+    }
+
+    @Test
+    void eachDoctorsWorkingDaysAreStatedPositively() {
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")), true);
+
+        // Derivable from the pattern rows, but derivable is not reliably derived:
+        // asked "is Dr. Mehta free today?" on a Sunday he does not work, the model
+        // scanned the pattern, failed to notice the ABSENCE of Sunday rows, and
+        // answered "yes, he is available today". Stating the working days turns
+        // that inference into a lookup.
+        assertThat(prompt).contains("WORKS: MONDAY");
+        assertThat(prompt).contains("they DO NOT work that day at all");
+    }
+
+    @Test
     void theClinicNameIsConfiguredNotHardcoded() {
-        String prompt = new BotPromptBuilder("Riverside Health").systemPrompt(snapshot(List.of("Orthopedic")));
+        String prompt = new BotPromptBuilder("Riverside Health").systemPrompt(snapshot(List.of("Orthopedic")), true);
 
         assertThat(prompt).contains("Riverside Health").doesNotContain("Super Clinic");
     }

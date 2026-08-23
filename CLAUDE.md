@@ -577,6 +577,12 @@ user sends a normal message with `recipientId` = the bot's user id.
    indistinguishable on the wire from a human's.
 10. `last_response_id` is stored and a `bot_token_usage` row written.
 
+**Target behaviour**: the three sample conversations in
+[`docs/bot-requirements.md`](docs/bot-requirements.md), which is the source
+requirement, now in the repo rather than only in a chat window. Each one drove
+a concrete prompt rule, and each rule exists because replaying the sample
+against the bot exposed a gap — see `BotPromptBuilder` and its test.
+
 **The OpenAI call**:
 - **Prompt stuffing (§6.1's deliberate naivety)**, injected every turn: all
   active doctors + specialties; all `AVAILABLE` pattern rows; all `BOOKED`
@@ -656,6 +662,31 @@ replies that it is unavailable.
     clinic data — the second of the two compounding curves `bot_token_usage`'s
     `turn_number` exists to separate. Version 2 should have those numbers
     before choosing a replay strategy (full history, a window, or summarised).
+
+**What Version 1 already gets wrong — measured, not predicted:**
+- **The model does the availability subtraction, and it is not reliable at it.**
+  §6.1 injects the working pattern and the booked appointments and leaves the
+  model to subtract one from the other. In live testing it offered a 10:30 slot
+  that was in the ALREADY BOOKED list — it had correctly noticed 10:00 was
+  taken and missed that the next slot was too. `BookingService`'s re-check
+  refused the booking, so nothing was double-booked, but the patient was
+  offered a time, agreed to it, and was then told it was gone.
+- **It also mis-read a doctor's working days**, telling a caller a doctor was
+  "available today" on a Sunday he does not work. That one WAS fixable by
+  prompting: the pattern rows say when a doctor works, and noticing the ABSENCE
+  of a weekday among three dozen rows is exactly what scanning misses, so each
+  doctor now carries an explicit `WORKS:` line. Stating the fact positively
+  turned an inference into a lookup and the error stopped.
+- **The subtraction error is the one that does not have a prompt fix**, and
+  that is the point. Set arithmetic over stuffed data is not something to
+  prompt harder at — it is what a tool call replaces, by having Java compute
+  the answer (`AvailabilityService` already does, exactly and in one place) and
+  handing the model the result instead of the raw inputs. Version 1 now has the
+  concrete failure that argues for Version 2, which is what it was built for.
+- Worth being precise about the blast radius: every wrong ANSWER is visible to
+  the user, and no wrong WRITE reaches the database. The model never books —
+  it requests, and §6.4 re-validates against live data. That separation is why
+  a demonstrably unreliable Version 1 is still safe to run.
 
 **Accepted tradeoffs, named:**
 - `appointments` has an **unconditional** unique constraint on
@@ -840,9 +871,13 @@ replies that it is unavailable.
 - Detailed HA/DR design
 - Multi-instance registry + pub/sub implementation (only needed once single-instance
   capacity is proven insufficient)
-- **Bot Version 2's tool calling** — the entire point of Version 1 being naive
-  (3.9). Deferred until `bot_token_usage` shows the cost curve rather than
-  merely predicting it.
+- **Bot Version 2's tool calling** — deferred, but **NOT optional**. The source
+  requirement ([`docs/bot-requirements.md`](docs/bot-requirements.md)) lists
+  "Tool Calling with Responses API" as something the bot has to be implemented
+  using, alongside the Responses API itself. So Version 1 alone does not meet
+  the requirement; the two were sequenced, not traded off. Version 1 exists to
+  make the naive approach's limits measurable before the tools that fix them
+  land — see 3.9's note on what it already got wrong in live testing.
 - **Bot LONG-TERM conversation memory** — "remembers you from days ago". Version
   1's `previous_response_id` chaining is NOT this and must not be mistaken for
   it (3.9): OpenAI's retention of a response id expires, and an expired chain is

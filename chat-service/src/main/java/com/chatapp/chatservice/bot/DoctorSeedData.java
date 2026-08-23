@@ -68,6 +68,16 @@ public class DoctorSeedData implements ApplicationRunner {
                 List.of(DayOfWeek.MONDAY, DayOfWeek.WEDNESDAY, DayOfWeek.FRIDAY),
                 LocalTime.of(9, 0), LocalTime.of(12, 0));
 
+        // A SECOND orthopedic doctor, and one who works weekends. Sample
+        // conversation (iii) in docs/bot-requirements.md turns on both: it asks
+        // the bot to list "the following orthopedic doctor(s)" as a choice, and
+        // then has the caller switch from one to another for the SAME day when
+        // the first isn't free. With a single orthopedic doctor, or with none
+        // working today, neither half of that conversation can happen at all.
+        seed("Dr. Anjali Desai", "Orthopedic",
+                List.of(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY, DayOfWeek.THURSDAY),
+                LocalTime.of(10, 0), LocalTime.of(13, 0));
+
         seed("Dr. Priya Nair", "Cardiology",
                 List.of(DayOfWeek.TUESDAY, DayOfWeek.THURSDAY),
                 LocalTime.of(10, 0), LocalTime.of(13, 0));

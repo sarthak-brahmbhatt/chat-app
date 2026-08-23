@@ -117,7 +117,7 @@ public class DoctorAssistantBotService {
         BotTurn turn;
         try {
             turn = respondRecoveringFromExpiredChain(
-                    promptBuilder.systemPrompt(snapshot), content, previousResponseId, conversationKey);
+                    snapshot, content, previousResponseId, conversationKey);
         } catch (BotBrainException e) {
             // Conversation state is deliberately left untouched. Keeping the last
             // GOOD response id means the next turn still chains onto a coherent
@@ -176,14 +176,19 @@ public class DoctorAssistantBotService {
      * previous_response_id chaining provides.
      */
     private BotTurn respondRecoveringFromExpiredChain(
-            String systemPrompt, String content, String previousResponseId, String conversationKey) {
+            ClinicSnapshot snapshot, String content, String previousResponseId, String conversationKey) {
         try {
-            return botBrain.respond(systemPrompt, content, previousResponseId);
+            return botBrain.respond(
+                    promptBuilder.systemPrompt(snapshot, previousResponseId == null), content, previousResponseId);
         } catch (ExpiredConversationException e) {
             log.info("Conversation {} could not chain onto {} (expired server-side); "
                             + "starting a fresh chain. The bot will not recall earlier turns.",
                     conversationKey, previousResponseId);
-            return botBrain.respond(systemPrompt, content, null);
+            // Rebuilt with firstTurn = true. The retry genuinely IS turn one as
+            // far as the model can see — it has no history — so the prompt must
+            // say so, or it would be told to carry on from a conversation it
+            // cannot remember.
+            return botBrain.respond(promptBuilder.systemPrompt(snapshot, true), content, null);
         }
     }
 
