@@ -21,8 +21,21 @@ import java.time.Instant;
  * <p>The memory itself lives on OpenAI's side: {@code last_response_id} is
  * handed back as {@code previous_response_id} on the next call, and the API
  * reattaches the prior turns. Storing one id is the entire mechanism — this
- * service never accumulates a transcript in memory, so nothing here grows per
- * message or needs expiring, and a restart loses no context.
+ * service never accumulates a transcript, so nothing here grows per message,
+ * and a restart loses no context.
+ *
+ * <p><b>The borrowed memory is not permanent, and this row can outlive it.</b>
+ * OpenAI ages response ids out server-side, so a value stored here days ago may
+ * no longer resolve. That is the ordinary fate of an idle conversation rather
+ * than a fault: {@link com.chatapp.chatservice.bot.ExpiredConversationException}
+ * carries the case, and the service retries once without the stale id, starting
+ * a fresh chain and overwriting this column with a live value.
+ *
+ * <p>So this table gives continuity WITHIN a conversation, not recall ACROSS
+ * days. Genuine long-term memory would mean storing the conversation ourselves
+ * and replaying it — deferred to Version 2 (CLAUDE.md §5). Worth stating plainly
+ * here, because chaining looks exactly like durable memory right up until the
+ * day it isn't.
  *
  * <p>The flip side, and the reason {@code bot_token_usage.turn_number} exists:
  * those reattached turns are re-billed as input tokens on every single call. So

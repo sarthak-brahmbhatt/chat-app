@@ -270,12 +270,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             WebSocketSession session, String senderId, ChatMessageRequest request, Instant sentAt) throws IOException {
         String botId = request.recipientId();
 
-        // The user's message is already delivered the instant the bot has it, so
-        // the double tick is sent here rather than waiting for a delivered_ack
-        // that no browser will ever send. Sent BEFORE the model call, not after:
-        // it is true as soon as the message arrives, and holding it back would
-        // leave the user watching a single tick for the length of an API call.
-        sendDoubleTickIfConnected(senderId, request.messageId());
+        // The SINGLE tick has already been sent by the caller, before this method
+        // and before anything is persisted (CLAUDE.md 3.1/3.4 — a write failure
+        // must never surface to the sender as a failed message). Reaching this
+        // line is what gives it its bot-specific meaning: the recipient resolved
+        // to the bot, so the message is routed and the bot has it.
 
         BotReply reply = doctorAssistantBotService.handleUserMessage(
                 senderId, botId, request.messageId(), request.content(), sentAt);
@@ -285,13 +284,45 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // the two bubbles as simultaneous.
         Instant repliedAt = Instant.now();
         chatMessageService.persistBotConversationMessage(
-                reply.messageId(), botId, senderId, reply.content(), repliedAt, false);
+                reply.messageId(), botId, senderId, reply.content(), repliedAt);
+
+        // Now — and only now — is the USER's message delivered in the sense a bot
+        // conversation means it. Written undelivered on arrival precisely so this
+        // flag and the live double tick below say the same thing: refresh the page
+        // mid-answer and history shows a single tick, matching what the open
+        // socket was showing a moment earlier.
+        chatMessageService.markDelivered(request.messageId());
+
+        // The DOUBLE tick, meaning "the bot has answered" — fired here and
+        // nowhere earlier (CLAUDE.md 3.9).
+        //
+        // In a human conversation the two ticks are "sent" and "reached the
+        // recipient's device". A bot has no device, so the literal translation
+        // would fire both the instant the message arrives: two ticks a
+        // millisecond apart, saying nothing the first one didn't. Repointing the
+        // second one at "the answer exists" makes the pair informative again,
+        // and the gap between them is not padding — it is the model call, the
+        // one genuinely slow step in the turn. The user watches a single tick
+        // for exactly as long as the bot is actually thinking.
+        //
+        // AFTER the reply is persisted, so the tick is never the only evidence
+        // of an answer: if the live push below fails, or the socket died during
+        // the call, the reply is already durable and history will show it. It is
+        // sent BEFORE that push so the tick flip and the bubble arrive in causal
+        // order rather than the reverse.
+        //
+        // Via the registry rather than the `session` in hand: this runs seconds
+        // after the message arrived, so the user may have reconnected onto a
+        // different session by now, or gone entirely — sendDoubleTickIfConnected
+        // resolves the current one and no-ops if there is none.
+        sendDoubleTickIfConnected(senderId, request.messageId());
 
         // Sent as an ordinary incoming_message, from the bot's user id. The
         // frontend has no bot-specific code at all: it renders this like any
-        // other message and auto-acks it, and that delivered_ack takes the normal
-        // path — which is what makes the bot's reply reach double tick the same
-        // way a human's does.
+        // other message and auto-acks it. That delivered_ack takes the normal
+        // path, which is what marks the BOT's OWN message row delivered — a
+        // separate thing from the double tick above, which is about the USER's
+        // message.
         IncomingChatMessage incoming = new IncomingChatMessage(
                 "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
         session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));

@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -33,8 +34,10 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -123,12 +126,45 @@ class BotRoutingTest {
                 .filter(t -> t != null && "ack".equals(t.type()))
                 .toList();
 
-        // The double tick normally waits for the recipient's browser to send a
-        // delivered_ack. The bot has no browser, so without this the user would
-        // sit on a single tick permanently — and it IS delivered, since the bot
-        // is answering it.
+        // Both ticks, with no delivered_ack anywhere — the bot has no browser to
+        // send one. What each MEANS is the subject of the two tests below.
         assertThat(ticks).extracting(TickAck::tick).containsExactly("single", "double");
         assertThat(ticks).allSatisfy(t -> assertThat(t.messageId()).isEqualTo("m1"));
+    }
+
+    @Test
+    void doubleTick_isSentOnlyAfterTheBotsReplyIsPersisted() throws IOException {
+        // The whole point of the two ticks meaning different things: single is
+        // "the bot got it", double is "the bot has answered". Firing them
+        // together, as the literal human-conversation translation would, gives
+        // the user two ticks a millisecond apart that say nothing.
+        stubBotReply("Here are some times.");
+        authenticate();
+
+        InOrder inOrder = inOrder(doctorAssistantBotService, chatMessageService, session);
+
+        handler.handleTextMessage(session, new TextMessage(chatMessage("m1", BOT_ID, "hi")));
+
+        inOrder.verify(doctorAssistantBotService).handleUserMessage(
+                anyString(), anyString(), anyString(), anyString(), any(Instant.class));
+        inOrder.verify(chatMessageService).persistBotConversationMessage(
+                eq("bot-msg-1"), anyString(), anyString(), anyString(), any(Instant.class));
+        inOrder.verify(chatMessageService).markDelivered("m1");
+        inOrder.verify(session).sendMessage(argThat(this::isDoubleTick));
+    }
+
+    @Test
+    void usersMessageRow_isMarkedDeliveredAtTheSameMomentAsTheDoubleTick() throws IOException {
+        // Keeps history honest. If the row were written delivered on arrival, a
+        // refresh during the model call would render a double tick for an answer
+        // that does not exist yet — the open socket and the reloaded page would
+        // disagree about the same message.
+        stubBotReply("Sure.");
+        authenticate();
+
+        handler.handleTextMessage(session, new TextMessage(chatMessage("m1", BOT_ID, "hi")));
+
+        verify(chatMessageService).markDelivered("m1");
     }
 
     @Test
@@ -153,21 +189,16 @@ class BotRoutingTest {
     }
 
     @Test
-    void botsReply_isPersistedUndeliveredSoTheUsersAckStillDrivesItsDoubleTick() throws IOException {
+    void botsReply_isPersistedAndAckedByTheUsersBrowserAsUsual() throws IOException {
         stubBotReply("Sure.");
         authenticate();
 
         handler.handleTextMessage(session, new TextMessage(chatMessage("m1", BOT_ID, "hi")));
 
-        // false, unlike the user's own message: the user DOES have a browser, and
-        // it will auto-ack this through the ordinary path.
+        // The user DOES have a browser, so this row reaches delivered the ordinary
+        // way — their client auto-acks it, exactly as for a human's message.
         verify(chatMessageService).persistBotConversationMessage(
-                org.mockito.ArgumentMatchers.eq("bot-msg-1"),
-                org.mockito.ArgumentMatchers.eq(BOT_ID),
-                org.mockito.ArgumentMatchers.eq(USER_ID),
-                org.mockito.ArgumentMatchers.eq("Sure."),
-                any(Instant.class),
-                org.mockito.ArgumentMatchers.eq(false));
+                eq("bot-msg-1"), eq(BOT_ID), eq(USER_ID), eq("Sure."), any(Instant.class));
     }
 
     @Test
@@ -180,7 +211,7 @@ class BotRoutingTest {
         verify(kafkaTemplate).send(anyString(), anyString(), any());
         verifyNoInteractions(doctorAssistantBotService);
         verify(chatMessageService, never()).persistBotConversationMessage(
-                anyString(), anyString(), anyString(), anyString(), any(), anyBoolean());
+                anyString(), anyString(), anyString(), anyString(), any());
     }
 
     private void stubBotReply(String content) {
@@ -197,6 +228,11 @@ class BotRoutingTest {
         ArgumentCaptor<TextMessage> captor = ArgumentCaptor.forClass(TextMessage.class);
         verify(session, org.mockito.Mockito.atLeastOnce()).sendMessage(captor.capture());
         return captor.getAllValues();
+    }
+
+    private boolean isDoubleTick(TextMessage message) {
+        TickAck tick = readTick(message);
+        return tick != null && "ack".equals(tick.type()) && "double".equals(tick.tick());
     }
 
     private TickAck readTick(TextMessage message) {

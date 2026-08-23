@@ -86,16 +86,66 @@ class DoctorAssistantBotServiceTest {
     }
 
     @Test
-    void usersMessage_isPersistedDirectlyAndAlreadyDelivered() {
+    void usersMessage_isPersistedDirectlyAndNotYetDelivered() {
         brain.next = turn(decision("Hello!", BotAction.NONE), "resp_1");
 
         service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
 
-        // Written delivered=true up front: the bot has no browser to send a
-        // delivered_ack, so a false row would strand the message on a single tick
-        // for good.
+        // Undelivered on arrival. In a bot conversation the double tick means
+        // "the bot has answered", so the handler flips this once the reply is
+        // persisted — inserting it pre-delivered would make a refresh during the
+        // model call show a double tick for an answer that does not exist yet.
         verify(chatMessageService).persistBotConversationMessage(
-                USER_MESSAGE_ID, USER_ID, BOT_ID, "hi", SENT_AT, true);
+                USER_MESSAGE_ID, USER_ID, BOT_ID, "hi", SENT_AT);
+    }
+
+    @Test
+    void expiredConversationChain_isRetriedFromScratchRatherThanFailing() {
+        // OpenAI does not retain conversation state forever, so a conversation
+        // resumed days later presents an id the API no longer knows. That is the
+        // ordinary fate of an idle conversation, not a fault, and must not reach
+        // the user as an error.
+        when(conversationStateRepository.findByConversationKey(CONVERSATION_KEY))
+                .thenReturn(Optional.of(new BotConversationState(CONVERSATION_KEY, "resp_ancient", SENT_AT)));
+        brain.failOnceWith = new ExpiredConversationException("resp_ancient is gone", null);
+        brain.next = turn(decision("Hi! How can I help?", BotAction.NONE), "resp_fresh");
+
+        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi again", SENT_AT);
+
+        assertThat(reply.content()).isEqualTo("Hi! How can I help?");
+        assertThat(brain.calls).isEqualTo(2);
+        // The retry drops the stale id — that is what starts a fresh chain.
+        assertThat(brain.seenPreviousResponseId).isNull();
+    }
+
+    @Test
+    void afterAnExpiredChain_theFreshResponseIdReplacesTheStaleOne() {
+        // Self-healing: without this the stale id would be presented again next
+        // turn, and every turn would silently cost two API calls.
+        when(conversationStateRepository.findByConversationKey(CONVERSATION_KEY))
+                .thenReturn(Optional.of(new BotConversationState(CONVERSATION_KEY, "resp_ancient", SENT_AT)));
+        brain.failOnceWith = new ExpiredConversationException("resp_ancient is gone", null);
+        brain.next = turn(decision("Hi!", BotAction.NONE), "resp_fresh");
+
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi again", SENT_AT);
+
+        ArgumentCaptor<BotConversationState> state = ArgumentCaptor.forClass(BotConversationState.class);
+        verify(conversationStateRepository).save(state.capture());
+        assertThat(state.getValue().getLastResponseId()).isEqualTo("resp_fresh");
+    }
+
+    @Test
+    void expiryRetryIsAttemptedOnce_andASecondFailureApologises() {
+        when(conversationStateRepository.findByConversationKey(CONVERSATION_KEY))
+                .thenReturn(Optional.of(new BotConversationState(CONVERSATION_KEY, "resp_ancient", SENT_AT)));
+        brain.failOnceWith = new ExpiredConversationException("resp_ancient is gone", null);
+        brain.failure = new BotBrainException("upstream 503");
+
+        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi again", SENT_AT);
+
+        assertThat(reply.content()).contains("something went wrong");
+        assertThat(brain.calls).isEqualTo(2);
+        verify(conversationStateRepository, never()).save(any());
     }
 
     @Test
@@ -180,7 +230,7 @@ class DoctorAssistantBotServiceTest {
         // The user's message is still persisted — it was really sent, and it has
         // to be in history whether or not the bot could answer.
         verify(chatMessageService).persistBotConversationMessage(
-                anyString(), anyString(), anyString(), anyString(), any(), eq(true));
+                anyString(), anyString(), anyString(), anyString(), any());
         verify(tokenUsageRepository, never()).save(any());
     }
 
@@ -257,6 +307,10 @@ class DoctorAssistantBotServiceTest {
         private boolean configured = true;
         private BotTurn next;
         private BotBrainException failure;
+        // Thrown on the FIRST call only, then cleared — models the expired-chain
+        // case, where the retry is expected to succeed. A plain `failure` would
+        // throw on the retry too and prove nothing about recovery.
+        private BotBrainException failOnceWith;
         private int calls;
         private String seenPreviousResponseId;
 
@@ -269,6 +323,11 @@ class DoctorAssistantBotServiceTest {
         public BotTurn respond(String systemPrompt, String userMessage, String previousResponseId) {
             calls++;
             seenPreviousResponseId = previousResponseId;
+            if (failOnceWith != null) {
+                BotBrainException once = failOnceWith;
+                failOnceWith = null;
+                throw once;
+            }
             if (failure != null) {
                 throw failure;
             }

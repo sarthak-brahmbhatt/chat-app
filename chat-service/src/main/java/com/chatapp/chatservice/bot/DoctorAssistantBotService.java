@@ -83,11 +83,14 @@ public class DoctorAssistantBotService {
      * @return the bot's reply, ready for the handler to persist and send
      */
     public BotReply handleUserMessage(String userId, String botId, String messageId, String content, Instant sentAt) {
-        // Step 1 — the user's message lands in `messages` synchronously. Written
-        // already-delivered: the bot has no browser to send a delivered_ack, and
-        // it has self-evidently received the message, so leaving the row false
-        // would strand it on a single tick permanently.
-        chatMessageService.persistBotConversationMessage(messageId, userId, botId, content, sentAt, true);
+        // Step 1 — the user's message lands in `messages` synchronously, written
+        // UNDELIVERED. The caller marks it delivered once the reply is persisted,
+        // because in a bot conversation the double tick means "the bot has
+        // answered" rather than "it arrived" (CLAUDE.md 3.9). Nothing else will
+        // ever flip it — the bot has no browser to send a delivered_ack, and the
+        // reconnect sweep only looks at rows where the RECONNECTING user is the
+        // recipient, which for these rows is the bot.
+        chatMessageService.persistBotConversationMessage(messageId, userId, botId, content, sentAt);
 
         String conversationKey = ConversationKey.of(userId, botId);
 
@@ -113,7 +116,8 @@ public class DoctorAssistantBotService {
         // Step 5 and 6 — the call, and the structured decision it returns.
         BotTurn turn;
         try {
-            turn = botBrain.respond(promptBuilder.systemPrompt(snapshot), content, previousResponseId);
+            turn = respondRecoveringFromExpiredChain(
+                    promptBuilder.systemPrompt(snapshot), content, previousResponseId, conversationKey);
         } catch (BotBrainException e) {
             // Conversation state is deliberately left untouched. Keeping the last
             // GOOD response id means the next turn still chains onto a coherent
@@ -142,6 +146,45 @@ public class DoctorAssistantBotService {
         recordTokenUsage(conversationKey, botMessageId, turn);
 
         return new BotReply(botMessageId, replyText);
+    }
+
+    /**
+     * Makes the call, and retries once from scratch if the conversation this turn
+     * was chaining onto no longer exists server-side (CLAUDE.md 3.9).
+     *
+     * <p>Version 1's memory is borrowed: one stored response id, and OpenAI holds
+     * the actual prior turns. That retention is not indefinite, so resuming a
+     * conversation after a long enough gap presents an id the API no longer
+     * knows. This is the ordinary fate of every idle conversation rather than a
+     * fault, and it must not reach the user as an error — from their side the bot
+     * has simply forgotten the earlier exchange, which is exactly what happened.
+     *
+     * <p>Retried WITHOUT the stale id, which starts a fresh chain. The new
+     * response id is then stored by the caller in the normal way, so the
+     * conversation self-heals: the stale value is overwritten and the next turn
+     * chains onto something live again.
+     *
+     * <p>Retried exactly once, and only for this one cause. A second failure is a
+     * real failure and propagates. Note also that the retry costs a full second
+     * call — worth a line in the log, because a conversation that hits this on
+     * every turn would mean the stale id is not being overwritten and the cost is
+     * silently doubling.
+     *
+     * <p>This is recovery, NOT long-term memory. Genuinely remembering a user
+     * across days would mean storing the conversation ourselves and replaying it
+     * — deferred to Version 2 (CLAUDE.md §5), and explicitly not something
+     * previous_response_id chaining provides.
+     */
+    private BotTurn respondRecoveringFromExpiredChain(
+            String systemPrompt, String content, String previousResponseId, String conversationKey) {
+        try {
+            return botBrain.respond(systemPrompt, content, previousResponseId);
+        } catch (ExpiredConversationException e) {
+            log.info("Conversation {} could not chain onto {} (expired server-side); "
+                            + "starting a fresh chain. The bot will not recall earlier turns.",
+                    conversationKey, previousResponseId);
+            return botBrain.respond(systemPrompt, content, null);
+        }
     }
 
     /**

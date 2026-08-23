@@ -2,6 +2,7 @@ package com.chatapp.chatservice.bot;
 
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
+import com.openai.errors.OpenAIServiceException;
 import com.openai.models.responses.ResponseCreateParams;
 import com.openai.models.responses.StructuredResponse;
 import com.openai.models.responses.StructuredResponseCreateParams;
@@ -12,6 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -102,6 +104,12 @@ public class OpenAiBotBrain implements BotBrain {
         StructuredResponse<BotDecision> response;
         try {
             response = client.responses().create(params);
+        } catch (OpenAIServiceException e) {
+            if (previousResponseId != null && isUnknownPreviousResponse(e)) {
+                throw new ExpiredConversationException(
+                        "previous_response_id " + previousResponseId + " is no longer known to OpenAI", e);
+            }
+            throw new BotBrainException("OpenAI Responses API call failed: " + e.getMessage(), e);
         } catch (RuntimeException e) {
             throw new BotBrainException("OpenAI Responses API call failed: " + e.getMessage(), e);
         }
@@ -118,6 +126,35 @@ public class OpenAiBotBrain implements BotBrain {
                 decision.action(), usage.inputTokens(), usage.outputTokens(), usage.totalTokens());
 
         return new BotTurn(decision, response.id(), usage, model);
+    }
+
+    /**
+     * Whether this error is specifically "the response you chained onto is gone",
+     * as opposed to any other 4xx.
+     *
+     * <p>The API reports it as a 404 naming {@code previous_response_id} in the
+     * error's {@code param}, which is the precise signal and the one checked
+     * first. The message text is checked as a fallback because this is a
+     * behaviour no test here can pin down — it needs a genuinely aged-out
+     * response id, which takes days to obtain and cannot be manufactured — so a
+     * second, looser recogniser is worth having if the error shape shifts.
+     *
+     * <p>Being wrong in either direction is survivable, which is what makes the
+     * loose check acceptable. A false positive costs one extra API call that
+     * starts a fresh chain. A false negative just apologises to the user and
+     * leaves the stale id in place, so the next turn tries again — annoying and
+     * self-inflicted, but not damaging.
+     */
+    private boolean isUnknownPreviousResponse(OpenAIServiceException e) {
+        if (e.param().filter("previous_response_id"::equals).isPresent()) {
+            return true;
+        }
+        String message = e.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.contains("previous response") && lower.contains("not found");
     }
 
     /**

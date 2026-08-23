@@ -491,7 +491,8 @@ handler plus its supporting domain; a fourth deployable would be pure overhead.
   rewrite what time an existing appointment was booked for.
 - `bot_conversation_state` — `conversation_key` (the SAME canonical pair key
   Kafka partitions on, now shared via `support/ConversationKey` so there is one
-  implementation rather than two that agree today) → `last_response_id`.
+  implementation rather than two that agree today) → `last_response_id`. See
+  **Conversation memory** below for what this does and does not buy.
 - `bot_token_usage` — one row per model call, with `turn_number`.
 
 **Availability is derived by SUBTRACTION, never stored as a flag** — free time is
@@ -515,31 +516,66 @@ a property of (slot, date), not of the slot, so there is nowhere to put a flag:
   filter; backward-looking ("what exists?") reads `appointments` directly and
   applies none.
 
+**Tick semantics for a bot conversation — the two ticks mean DIFFERENT things
+(revised).** This is the one place bot conversations deviate from 3.1's
+tick vocabulary, deliberately:
+
+| | Human conversation | Bot conversation |
+|---|---|---|
+| **Single tick** | chat-service received it | chat-service received it **and routed it to the bot** — "the bot got your message" |
+| **Double tick** | reached the recipient's device (`delivered_ack`) | the bot's reply has come back from OpenAI **and been persisted** — "the bot has answered" |
+
+- **Why not the literal translation.** A bot has no device, so "reached the
+  recipient's device" is true the instant the message arrives — both ticks would
+  fire a millisecond apart and the second would tell the user nothing the first
+  didn't. Repointing it at "the answer exists" makes the pair informative again.
+- **The gap between them is not padding — it IS the model call**, the one
+  genuinely slow step in the turn. So the user watches a single tick for exactly
+  as long as the bot is actually thinking, which is real feedback rather than
+  decoration, and needs no separate typing-indicator mechanism.
+- **The single tick keeps its existing ordering — fired before ANY persistence**
+  (3.1/3.4: a write failure must never surface to the sender as a failed
+  message). Only the double tick moved.
+- **The persisted `delivered` flag tracks the same meaning**, which is why the
+  user's message is now written UNDELIVERED and flipped when the reply lands.
+  Inserting it pre-delivered would make a page refresh mid-answer render a
+  double tick for an answer that does not exist yet — the open socket and the
+  reloaded page disagreeing about the same message. Nothing else would ever flip
+  it: the bot sends no `delivered_ack`, and the reconnect sweep (§4) only looks
+  at rows where the RECONNECTING user is the recipient, which here is the bot.
+- The double tick fires **after** the reply is persisted but **before** it is
+  pushed, so the tick is never the only evidence of an answer (if the push
+  fails, the reply is already durable and history shows it) and the flip
+  precedes the bubble rather than trailing it.
+
 **Message flow** — no new endpoint, no new socket path, no frontend change. The
 user sends a normal message with `recipientId` = the bot's user id.
 1. `ChatWebSocketHandler` sends the **single tick** exactly as always (3.1 —
    unchanged and deliberately not reordered: 3.4's "a write failure must never
    surface as a failed message" applies here too).
 2. If `BotDirectory.isBot(recipientId)`, divert — **no `ConnectionRegistry`
-   lookup**, which for the bot could only ever miss.
+   lookup**, which for the bot could only ever miss. Reaching this branch is
+   what gives the single tick its bot-specific meaning: routed, and the bot has
+   it.
 3. The user's message is persisted **synchronously, bypassing Kafka**, written
-   **already delivered**, and **double-ticked immediately**. Kafka exists to
-   decouple acking from durably storing when a recipient may be offline (3.4);
-   the bot never is, and it must read its own conversation within the same turn
-   — an insert landing after the reply would leave the next turn's history
-   missing the message it answers. The double tick is sent because the bot has
-   no browser to send a `delivered_ack`, so the message would otherwise sit on
-   one tick forever despite plainly having been received.
+   **undelivered**. Kafka exists to decouple acking from durably storing when a
+   recipient may be offline (3.4); the bot never is, and it must read its own
+   conversation within the same turn — an insert landing after the reply would
+   leave the next turn's history missing the message it answers.
 4. Fresh clinic data is queried **every turn, uncached** — at five doctors that
    is trivial, and a cache's staleness would be a correctness bug (offering a
    slot that is gone), not a performance trade.
 5. The Responses API is called over **plain blocking HTTP**, with
-   `previous_response_id` chaining if a prior turn exists.
+   `previous_response_id` chaining if a prior turn exists (see the memory note
+   below for what happens when that id has expired).
 6. **If `action = BOOK`: validate and write BEFORE any reply is sent** (below).
-7. The reply is persisted (delivered = false — the user DOES have a browser and
-   will ack it the ordinary way) and sent as a normal `incoming_message` from
-   the bot's user id, indistinguishable on the wire from a human's.
-8. `last_response_id` is stored and a `bot_token_usage` row written.
+7. The reply is persisted (undelivered — the user DOES have a browser and will
+   ack it the ordinary way).
+8. **The user's message row is marked delivered and the double tick fires** —
+   "the bot has answered".
+9. The reply is sent as a normal `incoming_message` from the bot's user id,
+   indistinguishable on the wire from a human's.
+10. `last_response_id` is stored and a `bot_token_usage` row written.
 
 **The OpenAI call**:
 - **Prompt stuffing (§6.1's deliberate naivety)**, injected every turn: all
@@ -587,6 +623,39 @@ name configurable, never hardcoded. **A missing key is a valid state, not a
 startup failure** — chat-service's real job is human chat, so an optional
 feature must not become a hard dependency of the whole service; the bot simply
 replies that it is unavailable.
+
+**Conversation memory — borrowed, and NOT long-term:**
+- Multi-turn memory is one stored `last_response_id`, replayed as
+  `previous_response_id`. **Nothing about the conversation is stored here** —
+  OpenAI holds the prior turns, and this side holds a pointer. That is what
+  keeps this service from accumulating a transcript per conversation, and it
+  means a chat-service restart loses no context.
+- **That retention is not indefinite.** OpenAI ages response ids out
+  server-side, so a conversation resumed after a long enough gap presents an id
+  the API no longer knows. This is the ordinary fate of every idle
+  conversation, not a fault.
+- **Handled, not prevented**: `OpenAiBotBrain` recognises that specific error
+  (a 404 whose `param` is `previous_response_id`, with a looser message-text
+  fallback) and raises `ExpiredConversationException`;
+  `DoctorAssistantBotService` retries **once, without the stale id**, which
+  starts a fresh chain. The new id is then stored as normal, so the
+  conversation self-heals rather than paying for two calls on every subsequent
+  turn. Logged at INFO — a conversation hitting this repeatedly means the
+  overwrite isn't happening and cost is quietly doubling. The user sees a bot
+  that has forgotten the earlier exchange, which is exactly what happened, not
+  an error.
+- **This is recovery, NOT memory.** Chaining gives continuity within a live
+  conversation and nothing more. **"The bot remembers you from days ago" is a
+  different feature and is explicitly NOT covered by `previous_response_id`** —
+  it would require storing conversation history ourselves and replaying it into
+  each call. **Deferred to Version 2** (§5), alongside tool calling. Worth being
+  precise about, because the chaining mechanism looks like durable memory right
+  up until the day it silently isn't.
+  - Note the cost that deferral avoids for now: replaying our own history would
+    make input tokens grow with conversation length on top of the stuffed
+    clinic data — the second of the two compounding curves `bot_token_usage`'s
+    `turn_number` exists to separate. Version 2 should have those numbers
+    before choosing a replay strategy (full history, a window, or summarised).
 
 **Accepted tradeoffs, named:**
 - `appointments` has an **unconditional** unique constraint on
@@ -774,6 +843,13 @@ replies that it is unavailable.
 - **Bot Version 2's tool calling** — the entire point of Version 1 being naive
   (3.9). Deferred until `bot_token_usage` shows the cost curve rather than
   merely predicting it.
+- **Bot LONG-TERM conversation memory** — "remembers you from days ago". Version
+  1's `previous_response_id` chaining is NOT this and must not be mistaken for
+  it (3.9): OpenAI's retention of a response id expires, and an expired chain is
+  handled by starting a fresh one. Real long-term memory means storing
+  conversation history ourselves and replaying it into each call — a Version 2
+  decision, with its own token-cost consequences to weigh against the numbers
+  Version 1 will have produced by then.
 - Bot appointment CANCELLATION. Load-bearing beyond its own absence: the
   unconditional unique constraint on `appointments` (3.9) assumes cancelled
   rows never appear, and `AppointmentStatus`'s `CANCELLED_*` constants exist

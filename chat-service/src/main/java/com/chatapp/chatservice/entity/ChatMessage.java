@@ -104,25 +104,4 @@ public class ChatMessage {
     public boolean isDelivered() {
         return delivered;
     }
-
-    /**
-     * Marks this message delivered in memory, before it is first saved.
-     *
-     * <p>Exists for the bot conversation path only (CLAUDE.md 3.9 §5.3). Every
-     * other message becomes delivered through the JPQL UPDATE in
-     * ChatMessageRepository.markDelivered, driven by a delivered_ack that the
-     * recipient's BROWSER sends — and the bot has no browser, so no ack will
-     * ever arrive for a message addressed to it. Since the bot demonstrably
-     * received the message (it is about to answer it), the row is written
-     * delivered from the start rather than inserted false and immediately
-     * updated.
-     *
-     * <p>Only meaningful before the first save. Flipping this on a managed
-     * entity would work through dirty checking, but nothing does that — the
-     * post-insert path is the repository UPDATE, which is what the Kafka
-     * ordering guarantee is built around.
-     */
-    public void markDelivered() {
-        this.delivered = true;
-    }
 }

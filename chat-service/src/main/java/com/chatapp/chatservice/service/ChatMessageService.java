@@ -160,19 +160,19 @@ public class ChatMessageService {
      * outcome, since without a persisted turn the bot could not have answered
      * coherently anyway.
      *
-     * @param delivered whether to write the row already marked delivered — true
-     *                  for a message TO the bot, which has no browser to send a
-     *                  delivered_ack but has plainly received it; false for a
-     *                  message FROM the bot, whose double tick arrives the
-     *                  ordinary way when the user's client acks it
+     * <p>Rows are written UNDELIVERED in both directions, and each reaches
+     * delivered by its own route. The bot's reply is acked by the user's browser
+     * like any other incoming message. The user's message to the bot has no
+     * browser to ack it, so ChatWebSocketHandler marks it delivered explicitly —
+     * at the moment the bot's answer is persisted, not on arrival, because for a
+     * bot conversation the double tick means "the bot has answered" (CLAUDE.md
+     * 3.9). Inserting it pre-delivered would make a page refresh during the model
+     * call show a double tick for an answer that does not exist yet.
      */
     @Transactional
     public ChatMessage persistBotConversationMessage(
-            String messageId, String senderId, String recipientId, String content, Instant sentAt, boolean delivered) {
+            String messageId, String senderId, String recipientId, String content, Instant sentAt) {
         ChatMessage message = new ChatMessage(messageId, senderId, recipientId, content, sentAt);
-        if (delivered) {
-            message.markDelivered();
-        }
         ChatMessage saved = chatMessageRepository.save(message);
         log.debug("Persisted bot-conversation message {} ({} -> {})", messageId, senderId, recipientId);
         return saved;
