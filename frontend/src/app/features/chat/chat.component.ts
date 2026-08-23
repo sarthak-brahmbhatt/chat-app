@@ -187,7 +187,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   private toBubble(message: ConversationMessageResponse, myUserId: string | null): ChatBubble {
     // A persisted message was, by definition, already single-ticked before
-    // it could ever reach messagedb (handleChatMessage sends the single
+    // it could ever be persisted (handleChatMessage sends the single
     // tick BEFORE publishing to Kafka - CLAUDE.md 3.4) - so a historical
     // 'sent' bubble is never 'pending', only 'single' or 'double' depending
     // on the persisted `delivered` flag.

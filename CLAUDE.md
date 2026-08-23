@@ -217,8 +217,32 @@ rather than pure production-necessity (called out where relevant).
   deliberate scope limit — not a gap to silently carry forward.
 
 ### 3.5 Data stores
-- **User DB**: users, credentials.
-- **Message DB**: persisted chat messages (written via Kafka consumer, async).
+- **`chatappdb` — ONE database for everything (revised, step 18).** This
+  REVERSES the original userdb/messagedb split. It holds users and
+  credentials, persisted chat messages, and the bot's tables (3.9).
+  - **Why the reversal**: the bot needs to join across users, messages,
+    doctors, availability and appointments in single queries — most
+    concretely, chat-service has to read `users.user_type` to know a
+    recipient is the bot at all, and the availability subtraction (3.9)
+    joins three tables in one statement. Two databases make that impossible
+    *in SQL* and push the join into Java. Both databases already lived in
+    the same MySQL container, so the isolation was convention, never
+    enforcement.
+  - **What it costs, deliberately**: the per-service data-ownership boundary
+    the split represented. Mitigated at the code level rather than the
+    database level — user-service remains the ONLY writer to `users`, and
+    chat-service's view of it (`entity/AppUser.java`) maps a subset of its
+    columns, pointedly not `password`, and exposes only finders. Nothing
+    enforces that any more; it is a convention held by review.
+  - **One real consequence**: chat-service's Hibernate `ddl-auto: update`
+    would create a PARTIAL `users` table if it won the startup race, leaving
+    user-service to ALTER a NOT NULL `password` column onto it. Ordered
+    away rather than relied upon — user-service gained a healthcheck and
+    chat-service a `depends_on` against it. That dependency is schema
+    ordering only; chat-service still never calls user-service (3.2).
+  - **No migration, by design**: local dev drops the volume and recreates
+    (`docker compose down -v`), and AWS is torn down. `mysql-init/` creates
+    only this one database; everything else is still Hibernate's.
 - **S3**: image storage for chat attachments (mentioned, not yet designed in
   detail).
 
@@ -425,6 +449,164 @@ discussion that weren't written down anywhere else yet.
   IAM user creation manual and out-of-band is intentional: credential
   provisioning is exactly the kind of action that stays a human's call.
 
+### 3.9 DoctorAssistant bot — Version 1 (build-order step 18)
+
+A conversational appointment assistant for a fictional clinic, reachable as an
+ordinary chat contact. Local Docker only — not deployed.
+
+- **Version 1 deliberately uses NO tool calling.** All doctor/availability/
+  appointment data is stuffed into the prompt on every turn, and **structured
+  outputs** let the model signal a booking that Java then executes. This is
+  knowingly the naive approach: it will hit prompt bloat, token cost that grows
+  with every doctor added, and an inability to reason over anything not
+  pre-injected. **Feeling those limits is the point** — Version 2's tools should
+  solve a problem that has actually been measured, not merely described. Hence
+  `bot_token_usage` (below): the argument for tools should be a query, not a
+  claim. Same "learning value over convenience" reasoning as choosing Kafka in
+  3.4 and EC2+ASG in 3.8.
+- **The bot is a real `users` row** (`username: doctorassistant`,
+  `user_type: BOT`, `last_name: NULL`, password = bcrypt of discarded
+  `SecureRandom` noise so nothing can ever present it at `/login`). This is what
+  keeps the frontend user list, the WebSocket envelope (3.1),
+  `messages.sender_id`/`recipient_id`, and conversation history (§4) working
+  **completely unchanged** — to all of them it is just another user. **No
+  frontend code changed for this feature at all.** Seeded by user-service
+  (`BotUserSeeder`), which owns `users` and already has the PasswordEncoder.
+- **`users.user_type`** (`VARCHAR(20) NOT NULL DEFAULT 'USER'`, values
+  `USER | BOT`) is the only thing that distinguishes it, and only chat-service's
+  routing branch looks. AGENT and DOCTOR are deferred (§5) — doctors are
+  reference data here and never log in.
+
+**Where the code lives**: a new `com.chatapp.chatservice.bot` package inside
+chat-service, NOT a separate microservice. It is one branch off an existing
+handler plus its supporting domain; a fourth deployable would be pure overhead.
+
+**Tables** (all in `chatappdb`, all Hibernate-managed):
+- `doctors` — name, specialty (free text, not an enum — see below), `active`.
+- `doctor_availability` — the RECURRING WEEKLY pattern only: `day_of_week`,
+  `start_time`/`end_time` (30-minute slots), `status: AVAILABLE | BLOCKED`.
+  Says nothing about bookings.
+- `appointments` — actual bookings on specific dates. Times are **denormalised
+  deliberately**: a doctor changing their pattern later must not retroactively
+  rewrite what time an existing appointment was booked for.
+- `bot_conversation_state` — `conversation_key` (the SAME canonical pair key
+  Kafka partitions on, now shared via `support/ConversationKey` so there is one
+  implementation rather than two that agree today) → `last_response_id`.
+- `bot_token_usage` — one row per model call, with `turn_number`.
+
+**Availability is derived by SUBTRACTION, never stored as a flag** — free time is
+a property of (slot, date), not of the slot, so there is nowhere to put a flag:
+> free(doctor, date) = availability rows matching date's weekday, `status =
+> AVAILABLE`, `doctors.active = TRUE` **MINUS** appointments for that doctor on
+> that date with `status = BOOKED`
+
+- **Expressed in exactly ONE place** — `AvailabilityService`, over a single
+  three-table query. The realistic second implementation subtracts bookings but
+  forgets `doctors.active`, reads as obviously correct, and silently offers
+  appointments with a doctor on leave. `AvailabilityServiceTest` asserts each
+  filter separately against a real database (H2) rather than a mock, since the
+  thing under test *is* a query.
+- **Soft deletes are FORWARD-LOOKING only.** `BLOCKED` and `active = FALSE` mean
+  "no NEW bookings from here on" — never "cancel what exists", never a physical
+  delete (historical appointments still reference those rows). Already-booked
+  appointments are honoured regardless; the doctor shows up. So there are two
+  query directions and confusing them is how a patient with a real appointment
+  gets told they have none: forward-looking ("what can I book?") applies every
+  filter; backward-looking ("what exists?") reads `appointments` directly and
+  applies none.
+
+**Message flow** — no new endpoint, no new socket path, no frontend change. The
+user sends a normal message with `recipientId` = the bot's user id.
+1. `ChatWebSocketHandler` sends the **single tick** exactly as always (3.1 —
+   unchanged and deliberately not reordered: 3.4's "a write failure must never
+   surface as a failed message" applies here too).
+2. If `BotDirectory.isBot(recipientId)`, divert — **no `ConnectionRegistry`
+   lookup**, which for the bot could only ever miss.
+3. The user's message is persisted **synchronously, bypassing Kafka**, written
+   **already delivered**, and **double-ticked immediately**. Kafka exists to
+   decouple acking from durably storing when a recipient may be offline (3.4);
+   the bot never is, and it must read its own conversation within the same turn
+   — an insert landing after the reply would leave the next turn's history
+   missing the message it answers. The double tick is sent because the bot has
+   no browser to send a `delivered_ack`, so the message would otherwise sit on
+   one tick forever despite plainly having been received.
+4. Fresh clinic data is queried **every turn, uncached** — at five doctors that
+   is trivial, and a cache's staleness would be a correctness bug (offering a
+   slot that is gone), not a performance trade.
+5. The Responses API is called over **plain blocking HTTP**, with
+   `previous_response_id` chaining if a prior turn exists.
+6. **If `action = BOOK`: validate and write BEFORE any reply is sent** (below).
+7. The reply is persisted (delivered = false — the user DOES have a browser and
+   will ack it the ordinary way) and sent as a normal `incoming_message` from
+   the bot's user id, indistinguishable on the wire from a human's.
+8. `last_response_id` is stored and a `bot_token_usage` row written.
+
+**The OpenAI call**:
+- **Prompt stuffing (§6.1's deliberate naivety)**, injected every turn: all
+  active doctors + specialties; all `AVAILABLE` pattern rows; all `BOOKED`
+  appointments for the next 7 days; today's date and current time (the model has
+  no clock); and **the DISTINCT specialty list read from the database at request
+  time**, which the prompt declares closed. That last one is what makes "sorry,
+  we have no dermatologist" work instead of the model inventing one — inventing
+  a plausible specialty is a far more fluent continuation than refusing. Free
+  text, not an enum, so seeding a doctor is the whole operation.
+  - Also injected, beyond the spec: an explicit **date → weekday list** for the
+    horizon. The model has no calendar any more than it has a clock, and
+    "next Tuesday" otherwise resolves to a confident, frequently wrong date.
+  - The prompt goes in the API's `instructions` field, NOT as a conversation
+    message. With chaining, instructions apply to the current call only and are
+    not carried forward — so each turn gets fresh data. As a message, every
+    turn's snapshot would accumulate, be re-billed forever, and leave the model
+    reading several contradictory versions of what is booked.
+- **Structured output** (`BotDecision`): `reply_to_user`, `action: BOOK | NONE`,
+  `availability_id` (nullable), `booked_for_date` (nullable). **The model
+  decides; Java acts** — the model can never write to the database. The SDK
+  derives a strict JSON schema from the record, so a reply that omits or invents
+  a field is not something to handle, it is something that cannot be produced.
+- **Booking: validate and write before replying** — (1) re-check the slot is
+  genuinely still free under the rules above, since the prompt was a snapshot
+  and not a lock; (2) verify the date's weekday matches the availability row's;
+  (3) insert; (4) only then send `reply_to_user`. On any failure the model's text
+  is **discarded entirely** and a Java-written message sent instead — that text
+  was written assuming success, and sending it tells a patient they have an
+  appointment nobody made. Also rejected: dates in the past (the subtraction is
+  date-agnostic and would report last Monday free), and unparseable dates (the
+  schema constrains the field to a *string*, so "next Tuesday" satisfies it).
+- **Explicitly not needed** (§7 of the design): no WebSocket to OpenAI (one
+  request, one reply — that is HTTP); no WebFlux (reactive is a concurrency
+  model, and the existing WebSocket already pushes to the browser from ordinary
+  blocking MVC code); no tool calling; no streaming.
+- **Not Spring AI**, called against the official `com.openai:openai-java` SDK
+  directly — same learning-value reasoning as 3.4/3.8. The cost is named rather
+  than discovered later: swapping to Bedrock is real rewrite work against
+  SDK-specific classes, not a config change.
+
+**Config**: `OPENAI_API_KEY` via a **gitignored `.env`** at the repo root, which
+Compose reads automatically (`.env.example` is the committed template). Model
+name configurable, never hardcoded. **A missing key is a valid state, not a
+startup failure** — chat-service's real job is human chat, so an optional
+feature must not become a hard dependency of the whole service; the bot simply
+replies that it is unavailable.
+
+**Accepted tradeoffs, named:**
+- `appointments` has an **unconditional** unique constraint on
+  `(availability_id, booked_for_date)`. It closes the check-then-write race a
+  re-read cannot, and is only correct while cancellation is out of scope — a
+  `CANCELLED_*` row would otherwise block that slot permanently, and MySQL has
+  no partial unique index to say "at most one BOOKED row".
+- **The model call runs inline on the WebSocket's inbound thread**, bounded by
+  `openai.timeout-seconds`. That keeps turns strictly ordered, so two
+  overlapping calls cannot chain off the same `previous_response_id`. Moving it
+  to an executor is where to start if bot conversations get concurrent enough to
+  matter, and it would need its own answer to that ordering question.
+- **A database failure during a bot turn IS visible to the user**, as an apology
+  rather than a reply — unlike the human path, which Kafka insulates. Honest:
+  without a persisted turn the bot could not have answered coherently anyway.
+- **A failed model call leaves `last_response_id` untouched**, so the next turn
+  still chains onto the last good response rather than the failure silently
+  wiping the conversation's memory.
+
+
 ## 4. Finalized API / sequence flows
 
 - `POST /register` (username, password, firstName, lastName) → User service checks
@@ -443,9 +625,23 @@ discussion that weren't written down anywhere else yet.
   returns single tick immediately → publishes async to Kafka for DB persistence
   → delivers live to Browser B if connected → Browser B acknowledges → Chat
   service returns double tick to Browser A.
+- Bot chat flow (WebSocket, same envelope as any other chat — CLAUDE.md 3.9):
+  Browser A sends a message with `recipientId` = the bot's user id → Chat
+  service returns single tick immediately → recognises `user_type = BOT` and
+  diverts instead of doing a ConnectionRegistry lookup → persists the message
+  synchronously (bypassing Kafka), already marked delivered, and returns the
+  double tick → queries fresh clinic data and the conversation's
+  `last_response_id` → calls the OpenAI Responses API → validates and writes
+  any booking BEFORE replying → persists the reply and delivers it to Browser A
+  as an ordinary `incoming_message` from the bot's id → records the new
+  response id and a token-usage row. Browser A's client auto-acks that reply
+  exactly as it would a human's, so the bot's own message reaches double tick
+  through the normal path.
+
 - `GET /conversations/{otherUserId}/messages` (JWT in header) → Chat service
   fetches the persisted conversation between the authenticated caller and
-  `otherUserId` from messagedb, oldest-to-newest → 200 OK + a message list
+  `otherUserId` from `chatappdb`'s `messages` table, oldest-to-newest → 200 OK
+  + a message list
   (empty list + "No messages yet." if there's no history), or 401 on
   missing/invalid/expired token. The Angular chat window calls this once, on
   open, to populate history before the live WebSocket connection is made (see
@@ -499,13 +695,19 @@ discussion that weren't written down anywhere else yet.
   - **A conversation with an `otherUserId` that doesn't correspond to any
     real user returns the exact same response as a real user with no shared
     history: `{"messages": [], "message": "No messages yet."}`.** This is
-    deliberate, not an unhandled edge case: messagedb has no users table and
-    chat-service has no dependency on user-service for this endpoint (see
-    3.2's service-boundary reasoning), so there is structurally no way to
-    distinguish "this user doesn't exist" from "this user exists but you've
-    never messaged them" without adding a new cross-service call purely to
-    validate a path parameter — real, unrequested coupling this pass
-    intentionally avoids.
+    deliberate, not an unhandled edge case. **The original reasoning was that
+    this was structurally impossible** — messagedb had no users table, and
+    checking would have meant a new cross-service call to user-service purely
+    to validate a path parameter (3.2), which that pass declined to add.
+    **Step 18's chatappdb consolidation (3.5) removed that impossibility**:
+    chat-service can now read `users` directly, so the endpoint COULD
+    distinguish the two cases with a local join and no new coupling at all.
+    It deliberately still doesn't. Telling an authenticated caller which user
+    ids exist turns this endpoint into a user-enumeration oracle, and the
+    identical-response design is the same anti-enumeration reasoning /login
+    already uses (3.3). What changed is the justification, not the behaviour —
+    it is now a choice rather than a constraint, which is worth knowing before
+    someone "fixes" it.
   - **CORS**: a new `WebMvcConfig` (chat-service's first) scopes
     `addCorsMappings` to `/conversations/**` specifically, allowing the same
     origins already trusted for the WebSocket handshake (`localhost:4200`,
@@ -569,6 +771,24 @@ discussion that weren't written down anywhere else yet.
 - Detailed HA/DR design
 - Multi-instance registry + pub/sub implementation (only needed once single-instance
   capacity is proven insufficient)
+- **Bot Version 2's tool calling** — the entire point of Version 1 being naive
+  (3.9). Deferred until `bot_token_usage` shows the cost curve rather than
+  merely predicting it.
+- Bot appointment CANCELLATION. Load-bearing beyond its own absence: the
+  unconditional unique constraint on `appointments` (3.9) assumes cancelled
+  rows never appear, and `AppointmentStatus`'s `CANCELLED_*` constants exist
+  only so the subtraction predicate is already `= BOOKED` rather than "any row".
+- Bot response STREAMING — Version 1 sends one whole reply. Adding it later
+  means relaying OpenAI's SSE chunks over the existing WebSocket.
+- Human-agent transfer and the `AGENT` user type; `DOCTOR` as a user type
+  (doctors are reference data — they never log in or chat).
+- Amazon Bedrock, and any other provider swap. Noted rather than merely
+  deferred: bypassing Spring AI (3.9) means this is real rewrite work against
+  OpenAI-SDK-specific classes, not a config change.
+- AWS deployment OF THE BOT — local Docker only. The CloudFormation template's
+  database bootstrap was still updated to `chatappdb` (3.5), because a stack
+  brought up with the old names would fail every query against a database that
+  was never created, pointing at nothing.
 - Offline message CONTENT re-delivery / a full offline-message queue — the
   reconnect-time delivery sweep (§4) closes the DELIVERY-STATUS gap (a
   reconnecting recipient's pending messages get marked delivered, and the
@@ -703,3 +923,9 @@ discussion that weren't written down anywhere else yet.
         once pagination makes 50+ message conversations the normal case
         being tested here, so it's fixed as part of this same pass rather
         than filed separately.
+18. DoctorAssistant appointment bot, Version 1 — no tool calling (see 3.9).
+    Consolidates userdb + messagedb into `chatappdb` first (3.5), then adds the
+    bot as a real BOT-typed `users` row, four new tables, and one routing branch
+    in `ChatWebSocketHandler`. No frontend change of any kind. Version 2's tool
+    calling is deliberately deferred until the naive approach's cost is
+    measurable in `bot_token_usage` rather than asserted (§5).

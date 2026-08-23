@@ -11,12 +11,12 @@ import jakarta.persistence.UniqueConstraint;
 import java.time.Instant;
 
 /**
- * A persisted chat message — one row per message in messagedb's "messages"
+ * A persisted chat message — one row per message in chatappdb's "messages"
  * table (CLAUDE.md 3.5, build-order step 8). Written exclusively by
  * ChatMessageConsumer, asynchronously, after the fact — this entity has
  * nothing to do with the live WebSocket round trip for SENDING a message
  * (ChatWebSocketHandler.handleChatMessage never touches this class or
- * messagedb at all). It IS now also touched from the delivery side — see
+ * the messages table at all). It IS now also touched from the delivery side — see
  * `delivered` below.
  *
  * messageId is the SAME client-generated correlation id from the WebSocket
@@ -54,7 +54,7 @@ public class ChatMessage {
     // Build-order step "message history": before this, double-tick was a
     // PURELY LIVE, in-memory concept (ChatWebSocketHandler.handleDeliveredAck
     // just forwarded a TickAck over the socket — see that method — and never
-    // touched messagedb). That was fine as long as tick state only mattered
+    // touched this table). That was fine as long as tick state only mattered
     // to a client that was live and connected at the moment delivery
     // happened. It stops being fine once history can be fetched later (this
     // column's whole reason for existing): a message delivered five minutes

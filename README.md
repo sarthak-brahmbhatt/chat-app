@@ -18,6 +18,13 @@ scroll-back through older messages — all delivered over a real-time
 WebSocket connection backed by an async, Kafka-mediated persistence
 pipeline.
 
+It also ships a **DoctorAssistant bot** — a conversational appointment
+assistant that appears in the user list like anyone else. Describe a symptom,
+it maps that to a specialty the clinic actually has, offers real free slots,
+and books one. It is deliberately built the naive way (no tool calling:
+everything is stuffed into the prompt each turn) so its scaling limits show up
+as measured token counts rather than predictions. See CLAUDE.md 3.9.
+
 ## Tech stack
 
 | Layer | Technology |
@@ -37,13 +44,21 @@ pipeline.
 flowchart LR
     Browser["Angular SPA"] -- "HTTPS (register/login/users/history)" --> UserSvc["user-service"]
     Browser -- "wss:// (send/receive, ticks)" --> ChatSvc["chat-service"]
-    UserSvc -- "credentials" --> UserDB[("MySQL: userdb")]
+    UserSvc -- "users, credentials" --> DB[("MySQL: chatappdb")]
     UserSvc -- "refresh tokens" --> Redis[("Redis")]
     ChatSvc -- "publish ChatMessageEvent /\nMessageDeliveredEvent" --> Kafka[["Kafka\n(partitioned by conversation)"]]
-    Kafka -- "consume, persist" --> MsgDB[("MySQL: messagedb")]
-    ChatSvc -. "read history" .-> MsgDB
+    Kafka -- "consume, persist" --> DB
+    ChatSvc -. "read history, users, clinic data" .-> DB
+    ChatSvc -- "messages to the BOT user" --> Bot["DoctorAssistant bot\n(package inside chat-service)"]
+    Bot -- "Responses API (HTTPS)" --> OpenAI[["OpenAI"]]
+    Bot -. "doctors, availability,\nappointments" .-> DB
     CDN["CloudFront + S3"] -. "serves static Angular build" .-> Browser
 ```
+
+One database, not two: `userdb` and `messagedb` were merged into `chatappdb`
+so the bot can join across users, messages and clinic data in single queries.
+That trades away the per-service data-ownership boundary deliberately — see
+CLAUDE.md 3.5.
 
 `user-service` is stateless HTTP (register/login/list users); `chat-service`
 is stateful (holds live WebSocket connections). They're split because they
@@ -142,6 +157,39 @@ npm start
 
 The app is served at `http://localhost:4200`. Register a couple of users to
 start a conversation.
+
+### Enabling the DoctorAssistant bot
+
+The stack runs fine without this — the bot just replies that it is
+unavailable. To turn it on, give it an OpenAI API key:
+
+```bash
+cp .env.example .env
+```
+
+Then edit `.env` and set `OPENAI_API_KEY=sk-...`. `.env` is gitignored; Docker
+Compose reads it automatically from the project root. Pick up the change with:
+
+```bash
+docker compose up -d --force-recreate chat-service
+```
+
+The bot is seeded as a user named **DoctorAssistant**, so it shows up in the
+user list next to everyone else — click it and start chatting. Five demo
+doctors across four specialties are seeded on first boot; there is
+deliberately no dermatologist, so asking for one exercises the "we don't offer
+that" path.
+
+Token cost per turn is recorded in `chatappdb.bot_token_usage` — the point of
+Version 1:
+
+```bash
+docker exec chat-app-mysql mysql -uroot -proot -e "SELECT turn_number, input_tokens, output_tokens, total_tokens, model FROM chatappdb.bot_token_usage ORDER BY id;"
+```
+
+> **Note:** the database consolidation means an existing local volume from
+> before this change still has the old `userdb`/`messagedb`. Run
+> `docker compose down -v` once to drop it and start fresh.
 
 To run the backend services natively instead of in Docker (e.g. from an
 IDE), see the `application.yml` in each of `user-service/` and

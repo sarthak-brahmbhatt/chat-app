@@ -18,7 +18,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * The one place messagedb gets read back out for a human to see (as opposed
+ * The one place persisted messages get read back out for a human to see (as opposed
  * to ChatMessageConsumer, which only ever writes to it). Sits between
  * ConversationController (HTTP-only concerns) and ChatMessageRepository
  * (persistence-only concerns) — same layering as UserService/AuthService in
@@ -63,21 +63,28 @@ public class ChatMessageService {
      * this is cursor-based rather than offset-based.
      *
      * "otherUserId doesn't correspond to a real user" and "otherUserId is a
-     * real user I've simply never messaged" are, from THIS service's point
-     * of view, the exact same case, and deliberately return the identical
-     * response - not a design gap. chat-service has no way to tell them
-     * apart: it has no users table of its own (messagedb only ever stores
-     * message rows, never user records - that's userdb, a different
-     * database owned by a different service), and there is no existing
-     * cross-service call anywhere in this system for chat-service to ask
-     * user-service "does this id exist?" Introducing one just for this
-     * would be new service-to-service coupling this architecture has
-     * deliberately avoided everywhere else (CLAUDE.md 3.2's service
-     * boundaries). A caller passing a nonexistent id simply sees the same
-     * "no messages yet" response as a caller starting a real, brand-new
-     * conversation - both are true statements about messagedb's own data,
-     * which is the only thing this service can actually answer questions
-     * about.
+     * real user I've simply never messaged" deliberately return the identical
+     * response - not a design gap.
+     *
+     * The ORIGINAL reason was that telling them apart was impossible:
+     * chat-service had no users table (messages lived in messagedb, users in
+     * userdb, a different database owned by a different service) and there was
+     * no cross-service call for it to ask user-service "does this id exist?".
+     * Adding one purely to validate a path parameter would have been new
+     * coupling this architecture avoids everywhere else (CLAUDE.md 3.2).
+     *
+     * That reason EXPIRED with the chatappdb consolidation (CLAUDE.md 3.5,
+     * build-order step 18). Users and messages now share one database, this
+     * service already reads `users` through AppUserRepository, and the check
+     * would be a local join with no new coupling whatsoever.
+     *
+     * It still returns the same response, now as a choice rather than a
+     * constraint: an endpoint that answers "that user doesn't exist"
+     * differently from "you've never messaged them" is a user-enumeration
+     * oracle for any authenticated caller, and returning one indistinguishable
+     * answer is the same anti-enumeration reasoning /login already uses
+     * (CLAUDE.md 3.3). Worth knowing before someone "fixes" this by adding the
+     * lookup that is now easy to add.
      */
     public ConversationHistoryResponse getConversationHistory(String currentUserId, String otherUserId, Instant before) {
         Pageable mostRecentFirst = PageRequest.of(0, HISTORY_LIMIT, Sort.by("sentAt").descending());
