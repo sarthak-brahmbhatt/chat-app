@@ -187,6 +187,21 @@ Version 1:
 docker exec chat-app-mysql mysql -uroot -proot -e "SELECT turn_number, input_tokens, output_tokens, total_tokens, model FROM chatappdb.bot_token_usage ORDER BY id;"
 ```
 
+### Inspecting the database
+
+A browser-based SQL client, behind an opt-in profile so it does not join the
+default stack:
+
+```bash
+docker compose --profile tools up -d adminer
+```
+
+Then <http://localhost:8083> — System `MySQL`, Server `mysql`, Username `root`,
+Password `root`, Database `chatappdb`.
+
+[`docs/bot-v1-structure.md`](docs/bot-v1-structure.md) maps the schema, says
+where each piece of bot logic lives, and lists what is still outstanding.
+
 > **Note:** the database consolidation means an existing local volume from
 > before this change still has the old `userdb`/`messagedb`. Run
 > `docker compose down -v` once to drop it and start fresh.

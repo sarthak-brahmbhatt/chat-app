@@ -121,6 +121,42 @@ services:
       retries: 10
       start_period: 30s
 
+  # A browser-based SQL client for chatappdb — schema, the rows the bot writes to
+  # `appointments`, and the token cost accumulating in `bot_token_usage`, all a
+  # plain SELECT away.
+  #
+  #     docker compose --profile tools up -d adminer
+  #     http://localhost:8083   (System: MySQL, Server: mysql,
+  #                              Username: root, Password: root, DB: chatappdb)
+  #
+  # Behind a PROFILE, so a plain `docker compose up` does not start it. Two
+  # reasons. It is a debugging tool, not part of the application, and it has no
+  # business in the stack whose connection capacity step 11 measures. And an
+  # Adminer started by hand outside Compose is a common thing to have running
+  # already — an unprofiled service here would collide with it on the container
+  # name and break `up` outright, which is a poor trade for a convenience.
+  #
+  # Adminer rather than phpMyAdmin: one ~10MB PHP file versus a whole
+  # application, and no configuration to speak of.
+  #
+  # DEV ONLY. Unauthenticated database access to anything that can reach the
+  # port — fine on a laptop, which is why this exists here and in no
+  # CloudFormation template.
+  adminer:
+    image: adminer:4
+    container_name: chat-app-adminer
+    profiles: ["tools"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8083:8080"
+    environment:
+      # Pre-fills the login form's server field so it is one less thing to
+      # retype; "mysql" is this Compose network's DNS name for the database.
+      ADMINER_DEFAULT_SERVER: mysql
+    depends_on:
+      mysql:
+        condition: service_healthy
+
   user-service:
     build: ./user-service
     container_name: chat-app-user-service
