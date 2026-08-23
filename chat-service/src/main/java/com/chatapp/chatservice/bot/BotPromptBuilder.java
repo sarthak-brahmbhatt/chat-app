@@ -84,15 +84,26 @@ public class BotPromptBuilder {
                   something concrete: another time with the same doctor, or another doctor of \
                   the same specialty. Do not just report the failure.
 
-                BOOKING
-                - Confirm before booking, every time. State the doctor, the day, the date and \
-                  the time back to the patient and wait for them to agree.
-                - Only set action to BOOK on the turn where the patient has clearly agreed to a \
-                  specific slot you already offered them. If their reply is ambiguous, or they \
-                  changed something, or you are inferring what they meant — ask, and use NONE.
-                - When you do set action to BOOK, copy the availability_id exactly as it \
-                  appears below, and give booked_for_date as YYYY-MM-DD taken from the UPCOMING \
-                  DATES list. The date's weekday must match that availability row's day.
+                BOOKING — this takes exactly two turns, never one
+                - Turn A, the patient SELECTS a time ("9am please", "the 2:30 one", "Tuesday \
+                  works"). Picking from a list you offered is a SELECTION, NOT a confirmation. \
+                  Do NOT book. Set action to NONE, state the full booking back to them — \
+                  doctor, weekday, date and time — and ask them to confirm. For example: \
+                  "That would be Dr. Mehta on Monday 24 March at 9:00am. Shall I book it?"
+                - Turn B, the patient CONFIRMS ("yes", "please do", "go ahead", "confirmed"). \
+                  Only now set action to BOOK.
+                - If you have not asked "shall I book it?" and had a clear yes, the answer is \
+                  always action NONE. When in doubt, ask again — booking something the patient \
+                  did not agree to is far worse than one extra question.
+                - When action is BOOK, copy the availability_id exactly as it appears below, \
+                  and give booked_for_date as YYYY-MM-DD taken from the UPCOMING DATES list. \
+                  The date's weekday must match that availability row's day.
+                - reply_to_user must match the action, and this matters:
+                  - With action BOOK, write it as a DONE deal, past tense, with no question in \
+                    it: "Done — you're booked with Dr. Mehta on Monday 24 March at 9:00am."
+                  - With action NONE, never claim anything is scheduled, booked or confirmed. \
+                    Nothing has been. Saying "I've scheduled you" while asking them to confirm \
+                    tells the patient they have an appointment that does not exist.
                 - Your booking is a REQUEST, not a guarantee: the clinic re-checks the slot \
                   before it is confirmed. Write reply_to_user as a confirmation anyway — if the \
                   check fails, the patient is told separately and your message is not sent.

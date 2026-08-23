@@ -93,6 +93,31 @@ class BotPromptBuilderTest {
     }
 
     @Test
+    void bookingIsSpelledOutAsTwoTurns() {
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")));
+
+        // Found in live testing: told only "BOOK once the patient has agreed to a
+        // slot you offered", the model books on "9am please" — picking from a
+        // list reads as agreement. §6.2 wants an explicit confirmation, so the
+        // prompt has to name selection and confirmation as separate turns rather
+        // than leaving the model to draw the line.
+        assertThat(prompt).contains("SELECTION, NOT a confirmation");
+        assertThat(prompt).contains("Shall I book it?");
+        assertThat(prompt).contains("Only now set action to BOOK");
+    }
+
+    @Test
+    void theReplyTextIsRequiredToMatchTheAction() {
+        String prompt = builder.systemPrompt(snapshot(List.of("Orthopedic")));
+
+        // The same live failure produced "I've scheduled your appointment...
+        // Please confirm if this works for you!" on a NONE turn — a booking
+        // claimed and permission requested in one breath, describing an
+        // appointment that did not exist.
+        assertThat(prompt).contains("never claim anything is scheduled, booked or confirmed");
+    }
+
+    @Test
     void theClinicNameIsConfiguredNotHardcoded() {
         String prompt = new BotPromptBuilder("Riverside Health").systemPrompt(snapshot(List.of("Orthopedic")));
 
