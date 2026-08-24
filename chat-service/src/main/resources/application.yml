@@ -117,6 +117,16 @@ bot:
   # approach, and the whole point is that this number is what makes token cost
   # grow. Widening it is how you make the scaling problem visible on purpose.
   booking-horizon-days: ${BOT_BOOKING_HORIZON_DAYS:7}
+  # Writes the exact prompt of every turn to `bot_prompt_log`, alongside the
+  # reply and the response-id chain. On by default: this project exists to make
+  # the naive approach's behaviour observable, and the first real bug found —
+  # two parallel patients being told each other's appointments — was invisible
+  # from token counts alone and obvious the moment the prompt could be read.
+  #
+  # It stores conversation content and the whole clinic dataset in the clear,
+  # several KB per turn. Fine locally; a retention policy, redaction, or this
+  # switch set to false is what a real deployment would need.
+  log-prompts: ${BOT_LOG_PROMPTS:true}
 
 server:
   port: 8080

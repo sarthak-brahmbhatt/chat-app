@@ -42,8 +42,14 @@ public class ClinicDataProvider {
         this.horizonDays = horizonDays;
     }
 
+    /**
+     * @param currentUserId whose conversation this is. Needed because the
+     *                      snapshot is no longer the same for every caller —
+     *                      it carries their own appointments as a distinct,
+     *                      separately-labelled list.
+     */
     @Transactional(readOnly = true)
-    public ClinicSnapshot snapshot() {
+    public ClinicSnapshot snapshot(long currentUserId) {
         LocalDate today = LocalDate.now(clock);
         LocalTime now = LocalTime.now(clock);
 
@@ -62,6 +68,11 @@ public class ClinicDataProvider {
                 // still bookable, so including them would spend tokens on rows
                 // that can only distract, and would grow without limit.
                 appointmentRepository.findInWindow(AppointmentStatus.BOOKED, today, horizonEnd),
+                // The caller's own, read separately and rendered under its own
+                // heading. The list above is availability data and carries no
+                // owner; this one is the only thing the bot may call "yours".
+                appointmentRepository.findInWindowForUser(
+                        currentUserId, AppointmentStatus.BOOKED, today, horizonEnd),
                 horizonEnd);
     }
 }

@@ -4,6 +4,7 @@ import com.chatapp.chatservice.bot.entity.BotConversationState;
 import com.chatapp.chatservice.bot.entity.BotTokenUsage;
 import com.chatapp.chatservice.bot.entity.Doctor;
 import com.chatapp.chatservice.bot.repository.BotConversationStateRepository;
+import com.chatapp.chatservice.bot.repository.BotPromptLogRepository;
 import com.chatapp.chatservice.bot.repository.BotTokenUsageRepository;
 import com.chatapp.chatservice.service.ChatMessageService;
 import com.chatapp.chatservice.support.ConversationKey;
@@ -69,6 +70,9 @@ class DoctorAssistantBotServiceTest {
     @Mock
     private BotTokenUsageRepository tokenUsageRepository;
 
+    @Mock
+    private BotPromptLogRepository promptLogRepository;
+
     private FakeBotBrain brain;
     private DoctorAssistantBotService service;
 
@@ -78,9 +82,9 @@ class DoctorAssistantBotServiceTest {
         Clock fixed = Clock.fixed(SENT_AT, ZoneOffset.UTC);
         service = new DoctorAssistantBotService(
                 brain, clinicDataProvider, promptBuilder, bookingService, chatMessageService,
-                conversationStateRepository, tokenUsageRepository, fixed);
+                conversationStateRepository, tokenUsageRepository, promptLogRepository, true, fixed);
 
-        lenient().when(clinicDataProvider.snapshot()).thenReturn(snapshotWithDoctors());
+        lenient().when(clinicDataProvider.snapshot(anyLong())).thenReturn(snapshotWithDoctors());
         lenient().when(promptBuilder.systemPrompt(any(), anyBoolean())).thenReturn("SYSTEM PROMPT");
         lenient().when(conversationStateRepository.findByConversationKey(anyString())).thenReturn(Optional.empty());
         lenient().when(tokenUsageRepository.countByConversationKey(anyString())).thenReturn(0L);
@@ -253,7 +257,7 @@ class DoctorAssistantBotServiceTest {
     void noActiveDoctors_shortCircuitsBeforeSpendingACall() {
         // A model handed an empty dataset is being invited to invent a doctor,
         // and there is no id it could legitimately book anyway.
-        when(clinicDataProvider.snapshot()).thenReturn(emptySnapshot());
+        when(clinicDataProvider.snapshot(anyLong())).thenReturn(emptySnapshot());
 
         BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "book me in", SENT_AT);
 
@@ -278,13 +282,13 @@ class DoctorAssistantBotServiceTest {
         return new ClinicSnapshot(
                 LocalDate.of(2026, 8, 24), LocalTime.of(9, 0),
                 List.of("Orthopedic"), List.of(new Doctor("Dr. Tushar Mehta", "Orthopedic")),
-                List.of(), List.of(), LocalDate.of(2026, 8, 30));
+                List.of(), List.of(), List.of(), LocalDate.of(2026, 8, 30));
     }
 
     private ClinicSnapshot emptySnapshot() {
         return new ClinicSnapshot(
                 LocalDate.of(2026, 8, 24), LocalTime.of(9, 0),
-                List.of(), List.of(), List.of(), List.of(), LocalDate.of(2026, 8, 30));
+                List.of(), List.of(), List.of(), List.of(), List.of(), LocalDate.of(2026, 8, 30));
     }
 
     private BotDecision decision(String reply, BotAction action) {

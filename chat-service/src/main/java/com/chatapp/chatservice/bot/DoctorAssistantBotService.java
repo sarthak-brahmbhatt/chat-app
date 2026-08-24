@@ -2,12 +2,15 @@ package com.chatapp.chatservice.bot;
 
 import com.chatapp.chatservice.bot.entity.BotConversationState;
 import com.chatapp.chatservice.bot.repository.BotConversationStateRepository;
+import com.chatapp.chatservice.bot.entity.BotPromptLog;
+import com.chatapp.chatservice.bot.repository.BotPromptLogRepository;
 import com.chatapp.chatservice.bot.repository.BotTokenUsageRepository;
 import com.chatapp.chatservice.bot.entity.BotTokenUsage;
 import com.chatapp.chatservice.service.ChatMessageService;
 import com.chatapp.chatservice.support.ConversationKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Clock;
@@ -51,6 +54,8 @@ public class DoctorAssistantBotService {
     private final ChatMessageService chatMessageService;
     private final BotConversationStateRepository conversationStateRepository;
     private final BotTokenUsageRepository tokenUsageRepository;
+    private final BotPromptLogRepository promptLogRepository;
+    private final boolean logPrompts;
     private final Clock clock;
 
     public DoctorAssistantBotService(
@@ -61,6 +66,8 @@ public class DoctorAssistantBotService {
             ChatMessageService chatMessageService,
             BotConversationStateRepository conversationStateRepository,
             BotTokenUsageRepository tokenUsageRepository,
+            BotPromptLogRepository promptLogRepository,
+            @Value("${bot.log-prompts}") boolean logPrompts,
             Clock clock) {
         this.botBrain = botBrain;
         this.clinicDataProvider = clinicDataProvider;
@@ -69,6 +76,8 @@ public class DoctorAssistantBotService {
         this.chatMessageService = chatMessageService;
         this.conversationStateRepository = conversationStateRepository;
         this.tokenUsageRepository = tokenUsageRepository;
+        this.promptLogRepository = promptLogRepository;
+        this.logPrompts = logPrompts;
         this.clock = clock;
     }
 
@@ -99,7 +108,7 @@ public class DoctorAssistantBotService {
         }
 
         // Steps 3 and 4 — fresh clinic data, and where the conversation left off.
-        ClinicSnapshot snapshot = clinicDataProvider.snapshot();
+        ClinicSnapshot snapshot = clinicDataProvider.snapshot(Long.parseLong(userId));
         if (snapshot.isEmpty()) {
             // Short-circuited before spending a call. With no active doctors the
             // prompt has nothing to offer and no id the model could legitimately
@@ -114,10 +123,14 @@ public class DoctorAssistantBotService {
                 .orElse(null);
 
         // Step 5 and 6 — the call, and the structured decision it returns.
+        // The prompt is built here rather than inside the retry helper so the
+        // exact text can be logged next to the turn it produced; the helper is
+        // handed the finished string.
+        String systemPrompt = promptBuilder.systemPrompt(snapshot, previousResponseId == null);
         BotTurn turn;
         try {
             turn = respondRecoveringFromExpiredChain(
-                    snapshot, content, previousResponseId, conversationKey);
+                    snapshot, systemPrompt, content, previousResponseId, conversationKey);
         } catch (BotBrainException e) {
             // Conversation state is deliberately left untouched. Keeping the last
             // GOOD response id means the next turn still chains onto a coherent
@@ -143,7 +156,9 @@ public class DoctorAssistantBotService {
         // it said, or the next turn contradicts it.
         String botMessageId = UUID.randomUUID().toString();
         recordResponseId(conversationKey, turn.responseId());
-        recordTokenUsage(conversationKey, botMessageId, turn);
+        int turnNumber = recordTokenUsage(conversationKey, botMessageId, turn);
+        recordPrompt(conversationKey, turnNumber, botMessageId, previousResponseId,
+                turn, systemPrompt, content, replyText);
 
         return new BotReply(botMessageId, replyText);
     }
@@ -176,10 +191,10 @@ public class DoctorAssistantBotService {
      * previous_response_id chaining provides.
      */
     private BotTurn respondRecoveringFromExpiredChain(
-            ClinicSnapshot snapshot, String content, String previousResponseId, String conversationKey) {
+            ClinicSnapshot snapshot, String systemPrompt, String content,
+            String previousResponseId, String conversationKey) {
         try {
-            return botBrain.respond(
-                    promptBuilder.systemPrompt(snapshot, previousResponseId == null), content, previousResponseId);
+            return botBrain.respond(systemPrompt, content, previousResponseId);
         } catch (ExpiredConversationException e) {
             log.info("Conversation {} could not chain onto {} (expired server-side); "
                             + "starting a fresh chain. The bot will not recall earlier turns.",
@@ -213,7 +228,8 @@ public class DoctorAssistantBotService {
                                 new BotConversationState(conversationKey, responseId, clock.instant())));
     }
 
-    private void recordTokenUsage(String conversationKey, String botMessageId, BotTurn turn) {
+    /** @return the turn number assigned, so the prompt log can line up with it. */
+    private int recordTokenUsage(String conversationKey, String botMessageId, BotTurn turn) {
         // Counted from the rows already written rather than held as a counter, so
         // the number cannot drift from the rows it numbers.
         int turnNumber = Math.toIntExact(tokenUsageRepository.countByConversationKey(conversationKey)) + 1;
@@ -226,5 +242,44 @@ public class DoctorAssistantBotService {
                 turn.usage().totalTokens(),
                 turn.model(),
                 clock.instant()));
+        return turnNumber;
+    }
+
+    /**
+     * Stores the exact prompt this turn sent, and what it produced
+     * (CLAUDE.md 3.9).
+     *
+     * <p>Added after a cross-conversation leak that was invisible from the
+     * outside: the token counts proved a call happened and what it cost, and
+     * said nothing about what it contained. Without the prompt itself there was
+     * no way to see that the data handed over was unattributed, which was the
+     * whole bug.
+     *
+     * <p>Failure here must never cost the user their reply — the turn already
+     * succeeded and the answer is already on its way, so a logging problem is
+     * logged and swallowed rather than turned into an apology.
+     */
+    private void recordPrompt(
+            String conversationKey, int turnNumber, String botMessageId, String previousResponseId,
+            BotTurn turn, String systemPrompt, String userMessage, String replyText) {
+        if (!logPrompts) {
+            return;
+        }
+        try {
+            promptLogRepository.save(new BotPromptLog(
+                    conversationKey,
+                    turnNumber,
+                    botMessageId,
+                    previousResponseId,
+                    turn.responseId(),
+                    systemPrompt,
+                    userMessage,
+                    replyText,
+                    turn.decision().action().name(),
+                    clock.instant()));
+        } catch (RuntimeException e) {
+            log.warn("Could not write prompt log for conversation {} turn {}: {}",
+                    conversationKey, turnNumber, e.getMessage());
+        }
     }
 }

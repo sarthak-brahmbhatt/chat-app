@@ -70,7 +70,7 @@ class BotPromptBuilderTest {
 
         String prompt = builder.systemPrompt(snapshotWith(List.of(booked)), true);
 
-        assertThat(prompt).contains("ALREADY BOOKED");
+        assertThat(prompt).contains("SLOTS ALREADY TAKEN");
         assertThat(prompt).contains("2026-08-24 | availability_id=11");
     }
 
@@ -80,7 +80,7 @@ class BotPromptBuilderTest {
 
         // An empty heading reads as missing data, and a model that thinks the
         // booking list is missing hedges instead of offering the slot.
-        assertThat(prompt).contains("Nothing is booked in this window");
+        assertThat(prompt).contains("Nothing is taken in this window");
     }
 
     @Test
@@ -177,6 +177,63 @@ class BotPromptBuilderTest {
     }
 
     @Test
+    void anotherPatientsBookingIsNeverAttributedToTheCaller() {
+        // The real bug this guards. Two patients chatting in parallel were each
+        // told about the other's appointments — Sarthak was told he had a 12:00
+        // slot that belonged to Vaidehi, and Vaidehi was told she had Sarthak's
+        // 11:00. Cause: ONE list headed "ALREADY BOOKED" with no owner on any
+        // row, so the model attributed every taken slot to whoever it was
+        // talking to. In a clinic that leaks who is seeing which doctor.
+        Appointment someoneElses = new Appointment(
+                1L, 11L, MONDAY, LocalTime.of(12, 0), LocalTime.of(12, 30), 999L, Instant.now());
+
+        String prompt = builder.systemPrompt(
+                build(List.of("Orthopedic"), List.of(someoneElses), List.of()), true);
+
+        // The taken list is framed as unavailability, with the owner explicitly
+        // unknown — not as anybody's appointment.
+        assertThat(prompt).contains("SLOTS ALREADY TAKEN");
+        assertThat(prompt).contains("owner unknown to you");
+        assertThat(prompt).doesNotContain("=== ALREADY BOOKED");
+
+        // And an empty own-list says so outright, because the failure mode was
+        // the model filling an apparent blank from the list above.
+        assertThat(prompt).contains("This patient has NO appointments booked");
+        assertThat(prompt).contains("do not read anything from the list above as theirs");
+    }
+
+    @Test
+    void theCallersOwnAppointmentsGetTheirOwnSection() {
+        Appointment mine = new Appointment(
+                1L, 11L, MONDAY, LocalTime.of(9, 0), LocalTime.of(9, 30), 42L, Instant.now());
+
+        String prompt = builder.systemPrompt(
+                build(List.of("Orthopedic"), List.of(mine), List.of(mine)), true);
+
+        assertThat(prompt).contains("THIS PATIENT'S APPOINTMENTS");
+        assertThat(prompt).doesNotContain("This patient has NO appointments booked");
+        // The prohibition has to be in the rules too, not only in the headings —
+        // a heading alone did not stop it.
+        assertThat(prompt).contains("Never say or imply that any of them belongs to the patient");
+        assertThat(prompt).contains("the ONLY list you may describe as theirs");
+    }
+
+    @Test
+    void theTakenSlotsListCarriesNoPatientIdentity() {
+        Appointment someoneElses = new Appointment(
+                1L, 11L, MONDAY, LocalTime.of(12, 0), LocalTime.of(12, 30), 999L, Instant.now());
+
+        String prompt = builder.systemPrompt(
+                build(List.of("Orthopedic"), List.of(someoneElses), List.of()), true);
+
+        // A taken slot is not private — anyone can discover it by trying to book
+        // it. WHO booked it is. So the row keeps the slot detail the model needs
+        // to subtract, and carries no user id for it to attach a person to.
+        assertThat(prompt).doesNotContain("999");
+        assertThat(prompt).doesNotContain("user_id");
+    }
+
+    @Test
     void theClinicNameIsConfiguredNotHardcoded() {
         String prompt = new BotPromptBuilder("Riverside Health").systemPrompt(snapshot(List.of("Orthopedic")), true);
 
@@ -184,19 +241,20 @@ class BotPromptBuilderTest {
     }
 
     private ClinicSnapshot snapshot(List<String> specialties) {
-        return build(specialties, List.of());
+        return build(specialties, List.of(), List.of());
     }
 
     private ClinicSnapshot snapshotWith(List<Appointment> bookings) {
-        return build(List.of("Orthopedic"), bookings);
+        return build(List.of("Orthopedic"), bookings, List.of());
     }
 
-    private ClinicSnapshot build(List<String> specialties, List<Appointment> bookings) {
+    private ClinicSnapshot build(
+            List<String> specialties, List<Appointment> bookings, List<Appointment> mine) {
         Doctor mehta = doctorWithId(1L, "Dr. Tushar Mehta", "Orthopedic");
         DoctorAvailability slot = availabilityWithId(11L, 1L);
 
         return new ClinicSnapshot(
-                MONDAY, LocalTime.of(9, 0), specialties, List.of(mehta), List.of(slot), bookings,
+                MONDAY, LocalTime.of(9, 0), specialties, List.of(mehta), List.of(slot), bookings, mine,
                 MONDAY.plusDays(6));
     }
 

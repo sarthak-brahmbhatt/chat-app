@@ -94,7 +94,8 @@ the prose, so wording can be tuned without breaking tests.
 
 | File | What it does |
 |---|---|
-| `bot/entity/*.java` | `Doctor`, `DoctorAvailability` (recurring weekly pattern), `Appointment` (actual bookings), `BotConversationState`, `BotTokenUsage`, plus the two status enums. |
+| `bot/entity/*.java` | `Doctor`, `DoctorAvailability` (recurring weekly pattern), `Appointment` (actual bookings), `BotConversationState`, `BotTokenUsage`, `BotPromptLog`, plus the two status enums. |
+| `bot/entity/BotPromptLog.java` | **One row per turn holding the exact prompt sent**, the reply, the action, and both response ids. The debugging surface — see below. |
 | `bot/DoctorSeedData.java` | Seeds six demo doctors and their weekly slots on startup. Idempotent. |
 | `entity/AppUser.java` | chat-service's **read-only** window onto `users` — the cross-table reach the database consolidation bought. |
 | `support/ConversationKey.java` | The canonical pair key, shared with Kafka partitioning so there is one implementation. |
@@ -219,6 +220,31 @@ docker exec chat-app-mysql mysql -uroot -proot chatappdb -e "SELECT turn_number,
 
 That last one is the point of Version 1 — see below.
 
+### Reading the exact prompt of any turn
+
+`bot_prompt_log` holds the full `instructions` payload per turn, so a turn can be
+reconstructed after the fact without a debugger:
+
+```sql
+SELECT conversation_key, turn_number, action,
+       LEFT(user_message, 50) AS user_said,
+       CHAR_LENGTH(system_prompt) AS prompt_chars,
+       COALESCE(previous_response_id, '(new chain)') AS chained_from
+FROM bot_prompt_log ORDER BY id;
+```
+
+To read what one turn actually said about a patient's own bookings:
+
+```sql
+SELECT SUBSTRING(system_prompt, LOCATE('=== SLOTS ALREADY TAKEN', system_prompt))
+FROM bot_prompt_log WHERE conversation_key = '1:4' ORDER BY id LIMIT 1;
+```
+
+This table exists because of a real bug it would have caught immediately — two
+patients in parallel were each told the other's appointments, and the token
+counts could prove only that a call had happened. `bot.log-prompts=false` turns
+it off; it stores conversation content in the clear.
+
 ---
 
 ## 4. What Version 1 proved
@@ -227,6 +253,22 @@ Input tokens across one four-turn conversation: **3719 → 3797 → 3862 → 394
 against a flat ~3400 of stuffed clinic data. So roughly **86% of every call is
 the same dataset re-sent**, and the remainder climbs with conversation length.
 Two compounding curves, with six doctors.
+
+### The cross-patient leak, and what it taught
+
+Two patients chatting in parallel were each told about the other's appointments.
+The conversation chains were never crossed — `bot_conversation_state` held
+separate `last_response_id`s throughout. The cause was the prompt DATA: every
+booked appointment went in as one list headed `ALREADY BOOKED` with **no owner on
+any row**, because its job was the availability subtraction where the owner is
+irrelevant. But the same prompt has to answer "what appointments do I have?", and
+with nothing marking whose was whose the model attributed all of them to whoever
+it was talking to.
+
+The fix is attribution, not a politer instruction: two separately-headed lists,
+`SLOTS ALREADY TAKEN — owner unknown to you` and `THIS PATIENT'S APPOINTMENTS`,
+the second read with a `userId` predicate. A taken slot is not private — anyone
+can find it by trying to book it — but *linking it to a person* is.
 
 It also produced the failure that argues for tools: asked for a 10:00 slot that
 was taken, the bot offered 10:30 — which was *also* in the booked list. It had

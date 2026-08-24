@@ -48,5 +48,32 @@ public interface AppointmentRepository extends JpaRepository<Appointment, Long> 
             @Param("from") LocalDate from,
             @Param("to") LocalDate to);
 
+    /**
+     * One patient's OWN bookings inside the window.
+     *
+     * <p>Deliberately a separate query from {@link #findInWindow}, feeding a
+     * separately-labelled section of the prompt. They answer different
+     * questions and conflating them caused a real cross-patient leak: the
+     * prompt used to carry one unattributed list of every booked slot, and the
+     * model — having no way to tell whose was whose — reported other patients'
+     * appointments as the caller's own, in both directions.
+     *
+     * <p>Bounded to the same horizon as the availability data so the two
+     * sections of the prompt describe the same stretch of calendar.
+     */
+    @Query("""
+            SELECT ap FROM Appointment ap
+            WHERE ap.userId = :userId
+              AND ap.status = :status
+              AND ap.bookedForDate >= :from
+              AND ap.bookedForDate <= :to
+            ORDER BY ap.bookedForDate ASC, ap.startTime ASC
+            """)
+    List<Appointment> findInWindowForUser(
+            @Param("userId") Long userId,
+            @Param("status") AppointmentStatus status,
+            @Param("from") LocalDate from,
+            @Param("to") LocalDate to);
+
     List<Appointment> findByUserIdOrderByBookedForDateAscStartTimeAsc(Long userId);
 }

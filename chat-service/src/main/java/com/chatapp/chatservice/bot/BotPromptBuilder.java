@@ -109,7 +109,7 @@ public class BotPromptBuilder {
                 - Once a doctor is settled, if the patient has not said when they want to come, \
                   ask: what date and time would they like?
                 - A slot is free if it appears in WEEKLY WORKING PATTERN and there is no row in \
-                  ALREADY BOOKED for that same availability_id on that same date.
+                  SLOTS ALREADY TAKEN for that same availability_id on that same date.
                 - The working pattern RECURS every week. A row for MONDAY means every Monday, \
                   not one specific Monday. Use the UPCOMING DATES list to turn "today", \
                   "tomorrow" or a weekday into a real date — never calculate a date yourself.
@@ -152,6 +152,17 @@ public class BotPromptBuilder {
                 - Your booking is a REQUEST, not a guarantee: the clinic re-checks the slot \
                   before it is confirmed. Write reply_to_user as a confirmation anyway — if the \
                   check fails, the patient is told separately and your message is not sent.
+
+                OTHER PATIENTS' PRIVACY — ABSOLUTE
+                - SLOTS ALREADY TAKEN below tells you a slot is unavailable and NOTHING else. \
+                  You do not know who booked those slots. Never say or imply that any of them \
+                  belongs to the patient you are talking to, and never speculate about who they \
+                  belong to.
+                - THIS PATIENT'S APPOINTMENTS below is the ONLY list you may describe as \
+                  theirs. If it is empty, they have no appointments — say exactly that, even if \
+                  SLOTS ALREADY TAKEN is full.
+                - Asked "what appointments do I have?", answer from THIS PATIENT'S APPOINTMENTS \
+                  alone. Count them from that list only. Do not add to it from anywhere else.
 
                 WHEN WE CANNOT HELP
                 - If the specialty a patient needs is NOT in the list below, tell them which \
@@ -252,19 +263,41 @@ public class BotPromptBuilder {
             }
         }
 
-        out.append("\n=== ALREADY BOOKED (").append(snapshot.today())
+        // Unavailability ONLY. No patient, no owner, not even a hint of one —
+        // the heading says what these rows mean, because when they were headed
+        // "ALREADY BOOKED" with no owner the model read them as the caller's
+        // own and handed two parallel patients each other's appointments.
+        out.append("\n=== SLOTS ALREADY TAKEN — unavailable; owner unknown to you (")
+                .append(snapshot.today())
                 .append(" to ").append(snapshot.horizonEnd()).append(") ===\n");
         if (snapshot.bookings().isEmpty()) {
             // Stated explicitly rather than left as an empty section. An empty
             // heading reads as missing data, and a model that thinks the booking
             // list is missing hedges instead of offering the slot.
-            out.append("Nothing is booked in this window — every slot in the pattern above is free.\n");
+            out.append("Nothing is taken in this window — every slot in the pattern above is free.\n");
         } else {
             for (Appointment ap : snapshot.bookings()) {
                 Doctor d = doctorsById.get(ap.getDoctorId());
                 out.append(ap.getBookedForDate())
                         .append(" | availability_id=").append(ap.getAvailabilityId())
                         .append(" | doctor_id=").append(ap.getDoctorId())
+                        .append(" | ").append(d == null ? "?" : d.getName())
+                        .append(" | ").append(ap.getStartTime()).append('-').append(ap.getEndTime())
+                        .append('\n');
+            }
+        }
+
+        // The caller's own — the only bookings the bot may call "yours".
+        out.append("\n=== THIS PATIENT'S APPOINTMENTS — the ONLY ones that are theirs ===\n");
+        if (snapshot.myAppointments().isEmpty()) {
+            // Said outright, because the failure mode is the model filling an
+            // apparent blank from the taken-slots list above.
+            out.append("This patient has NO appointments booked. If they ask, tell them they "
+                    + "have none — do not read anything from the list above as theirs.\n");
+        } else {
+            for (Appointment ap : snapshot.myAppointments()) {
+                Doctor d = doctorsById.get(ap.getDoctorId());
+                out.append(ap.getBookedForDate())
                         .append(" | ").append(d == null ? "?" : d.getName())
                         .append(" | ").append(ap.getStartTime()).append('-').append(ap.getEndTime())
                         .append('\n');

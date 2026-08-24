@@ -38,8 +38,15 @@ import java.util.stream.Collectors;
  *                     specialty work instead of the model inventing one
  * @param doctors      active doctors only
  * @param pattern      the recurring weekly working hours — NOT free time
- * @param bookings     BOOKED appointments inside the horizon; what has to be
- *                     subtracted from {@code pattern} to get free time
+ * @param bookings     every BOOKED appointment inside the horizon, from all
+ *                     patients — purely the subtraction input for working out
+ *                     what is free. Rendered WITHOUT any owner, because who
+ *                     booked a slot is none of the caller's business.
+ * @param myAppointments the CALLER's own bookings, and the only ones the bot may
+ *                     ever describe as theirs. Split out from {@code bookings}
+ *                     after a real leak in which one unattributed list let the
+ *                     model hand each of two parallel patients the other's
+ *                     appointments.
  * @param horizonEnd   the last date {@code bookings} covers, so the prompt can
  *                     say plainly how far ahead its booking data is trustworthy
  */
@@ -50,6 +57,7 @@ public record ClinicSnapshot(
         List<Doctor> doctors,
         List<DoctorAvailability> pattern,
         List<Appointment> bookings,
+        List<Appointment> myAppointments,
         LocalDate horizonEnd) {
 
     /**

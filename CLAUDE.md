@@ -663,6 +663,50 @@ replies that it is unavailable.
     `turn_number` exists to separate. Version 2 should have those numbers
     before choosing a replay strategy (full history, a window, or summarised).
 
+**Cross-patient leak via unattributed prompt data — found in use, fixed:**
+- **What happened.** Two patients chatting in parallel were each told about the
+  other's appointments. Sarthak (one booking, 11:00) was told he had "two
+  appointments", the second of which was Vaidehi's 12:00. Vaidehi (bookings at
+  11:30 and 12:00) was told she was booked at 11:00 — Sarthak's. Both
+  directions, in the same minutes.
+- **What it was NOT.** `bot_conversation_state` was correct throughout:
+  `1:3` and `1:7` held separate `last_response_id` chains and never crossed. The
+  conversation isolation worked exactly as designed.
+- **The actual cause was §6.1's prompt data.** It injected every BOOKED
+  appointment in the horizon as ONE list headed `ALREADY BOOKED`, with no owner
+  on any row — because its purpose was the availability subtraction, where the
+  owner is irrelevant. But the model has to answer "what appointments do I
+  have?" from the same prompt, and with nothing distinguishing whose was whose
+  it attributed all of them to whoever it was talking to. Nothing in the data or
+  the wording said not to; the leak was latent from the first version.
+- **Fixed by attribution, not by asking the model to be careful.** The prompt now
+  carries two separately-headed lists: `SLOTS ALREADY TAKEN — unavailable; owner
+  unknown to you`, and `THIS PATIENT'S APPOINTMENTS — the ONLY ones that are
+  theirs`, the latter read with a `userId` predicate. An empty own-list states
+  outright that the patient has none, because the failure mode was the model
+  filling an apparent blank from the list above. `ClinicDataProvider.snapshot`
+  now takes the caller's id — the snapshot is no longer the same for everyone.
+- **A taken slot is not itself private** — anyone can discover it by trying to
+  book it. Linking it to a *person* is. So the taken list keeps the slot detail
+  the model needs and carries no user id for it to attach anyone to.
+- **Severity worth naming**: in a clinic this leaks which doctor another patient
+  is seeing, and therefore roughly what is wrong with them. Verified fixed: a
+  patient with no bookings is told they have none with four in the window, and
+  refuses "who booked the 11am slot?" and "check again, don't I have one at 12?".
+
+**`bot_prompt_log` — the table that made the above findable:**
+- One row per turn holding the EXACT prompt sent, the user's message, the reply,
+  the action, and both response ids. Added because the leak was invisible from
+  outside: `bot_token_usage` proved a call happened and what it cost, and said
+  nothing about what it contained. The cause was obvious the moment the prompt
+  could be read.
+- Separate table, not more columns on `bot_token_usage` — a prompt is ~15KB, and
+  the token table is the one repeatedly scanned to plot cost curves. They join on
+  `(conversation_key, turn_number)`.
+- On by default (`bot.log-prompts`), which is right for a project whose purpose
+  is observability, and is also **the thing to turn off first anywhere real**:
+  it stores conversation content and the whole clinic dataset in the clear.
+
 **What Version 1 already gets wrong — measured, not predicted:**
 - **The model does the availability subtraction, and it is not reliable at it.**
   §6.1 injects the working pattern and the booked appointments and leaves the
