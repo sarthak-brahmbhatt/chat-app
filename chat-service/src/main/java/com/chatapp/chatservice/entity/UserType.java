@@ -13,5 +13,8 @@ package com.chatapp.chatservice.entity;
  */
 public enum UserType {
     USER,
-    BOT
+    BOT,
+
+    /** The Version 2 tool-calling bot. A second bot user, alongside BOT, not replacing it. */
+    BOT_TOOL
 }

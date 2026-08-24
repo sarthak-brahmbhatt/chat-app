@@ -44,39 +44,52 @@ public class BotUserSeeder implements ApplicationRunner {
     private final PasswordEncoder passwordEncoder;
     private final String botUsername;
     private final String botDisplayName;
+    private final String toolBotUsername;
+    private final String toolBotDisplayName;
 
     public BotUserSeeder(
             UserRepository userRepository,
             PasswordEncoder passwordEncoder,
             @Value("${bot.username}") String botUsername,
-            @Value("${bot.display-name}") String botDisplayName) {
+            @Value("${bot.display-name}") String botDisplayName,
+            @Value("${bot.tool-username}") String toolBotUsername,
+            @Value("${bot.tool-display-name}") String toolBotDisplayName) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.botUsername = botUsername;
         this.botDisplayName = botDisplayName;
+        this.toolBotUsername = toolBotUsername;
+        this.toolBotDisplayName = toolBotDisplayName;
     }
 
     @Override
     public void run(ApplicationArguments args) {
-        if (userRepository.existsByUsername(botUsername)) {
-            log.info("Bot user '{}' already present, nothing to seed", botUsername);
+        // Both bots, every boot. They coexist deliberately: the prompt-stuffing
+        // version and the tool-calling version answer side by side against the
+        // same clinic data, which is what makes the comparison demonstrable
+        // rather than described.
+        seedBot(botUsername, botDisplayName, UserType.BOT);
+        seedBot(toolBotUsername, toolBotDisplayName, UserType.BOT_TOOL);
+    }
+
+    private void seedBot(String username, String displayName, UserType type) {
+        if (userRepository.existsByUsername(username)) {
+            log.info("Bot user '{}' already present, nothing to seed", username);
             return;
         }
 
         User bot = new User(
-                botUsername,
+                username,
                 unusablePassword(),
-                botDisplayName,
+                displayName,
                 // NULL, deliberately: "DoctorAssistant" is a whole name, not a
                 // first name awaiting a surname. The column is already nullable
-                // (lastName is optional at registration), and the frontend
-                // already renders a null last name, so nothing needs a
-                // placeholder here.
+                // and the frontend already renders a null last name.
                 null,
-                UserType.BOT);
+                type);
 
         User saved = userRepository.save(bot);
-        log.info("Seeded bot user '{}' with id {}", saved.getUsername(), saved.getId());
+        log.info("Seeded {} user '{}' with id {}", type, saved.getUsername(), saved.getId());
     }
 
     /**

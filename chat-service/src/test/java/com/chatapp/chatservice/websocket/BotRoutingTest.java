@@ -1,9 +1,10 @@
 package com.chatapp.chatservice.websocket;
 
-import com.chatapp.chatservice.bot.BotDirectory;
-import com.chatapp.chatservice.bot.BotReply;
-import com.chatapp.chatservice.bot.DoctorAssistantBotService;
+import com.chatapp.chatservice.bot.routing.BotDirectory;
+import com.chatapp.chatservice.bot.routing.BotReply;
+import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
+import com.chatapp.chatservice.entity.UserType;
 import com.chatapp.chatservice.dto.TickAck;
 import com.chatapp.chatservice.kafka.ChatMessagePublisher;
 import com.chatapp.chatservice.security.JwtValidator;
@@ -30,6 +31,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -89,7 +91,10 @@ class BotRoutingTest {
         // lenient(): the one test about the human path never asks about BOT_ID,
         // so strict stubbing would fail it for an "unused" stub that every other
         // test in the class needs.
-        lenient().when(botDirectory.isBot(BOT_ID)).thenReturn(true);
+        //
+        // botKindOf, not isBot: with two bots answering, the handler needs to
+        // know WHICH one, so a boolean is no longer enough to route on.
+        lenient().when(botDirectory.botKindOf(BOT_ID)).thenReturn(Optional.of(UserType.BOT));
 
         handler = new ChatWebSocketHandler(
                 jwtValidator, new ConnectionRegistry(), objectMapper,
@@ -203,7 +208,7 @@ class BotRoutingTest {
 
     @Test
     void messageToAHuman_isUnaffectedByTheBranch() throws IOException {
-        when(botDirectory.isBot("99")).thenReturn(false);
+        when(botDirectory.botKindOf("99")).thenReturn(Optional.empty());
         authenticate();
 
         handler.handleTextMessage(session, new TextMessage(chatMessage("m1", "99", "hey")));

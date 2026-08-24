@@ -1,7 +1,7 @@
 package com.chatapp.chatservice.websocket;
 
-import com.chatapp.chatservice.bot.BotDirectory;
-import com.chatapp.chatservice.bot.DoctorAssistantBotService;
+import com.chatapp.chatservice.bot.routing.BotDirectory;
+import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
 import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
@@ -36,6 +36,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -142,7 +143,7 @@ class ChatWebSocketHandlerTest {
         // in build-order step 18 must not fire in any of them — this default is
         // what keeps them all testing what they were written to test. The bot's
         // own behaviour is covered separately in BotRoutingTest.
-        lenient().when(botDirectory.isBot(anyString())).thenReturn(false);
+        lenient().when(botDirectory.botKindOf(anyString())).thenReturn(Optional.empty());
 
         ChatMessagePublisher chatMessagePublisher = new ChatMessagePublisher(kafkaTemplate);
         handler = new ChatWebSocketHandler(

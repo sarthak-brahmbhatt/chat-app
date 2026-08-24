@@ -111,6 +111,8 @@ bot:
   # both services so the two cannot drift apart silently — a mismatch would show up
   # as "the bot never answers" with nothing pointing at the cause.
   username: ${BOT_USERNAME:doctorassistant}
+  # Must match user-service's bot.tool-username — same drift hazard as above.
+  tool-username: ${BOT_TOOL_USERNAME:doctorassistant-tools}
   clinic-name: ${BOT_CLINIC_NAME:Super Clinic}
   # How far ahead §6.1's prompt stuffing reaches when injecting existing bookings.
   # Deliberately small: this is Version 1's naive "put everything in the prompt"

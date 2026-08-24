@@ -1,11 +1,11 @@
 package com.chatapp.chatservice.testsupport;
 
-import com.chatapp.chatservice.bot.repository.AppointmentRepository;
-import com.chatapp.chatservice.bot.repository.BotConversationStateRepository;
-import com.chatapp.chatservice.bot.repository.BotPromptLogRepository;
-import com.chatapp.chatservice.bot.repository.BotTokenUsageRepository;
-import com.chatapp.chatservice.bot.repository.DoctorAvailabilityRepository;
-import com.chatapp.chatservice.bot.repository.DoctorRepository;
+import com.chatapp.chatservice.bot.clinic.repository.AppointmentRepository;
+import com.chatapp.chatservice.bot.conversation.repository.BotConversationStateRepository;
+import com.chatapp.chatservice.bot.conversation.repository.BotPromptLogRepository;
+import com.chatapp.chatservice.bot.conversation.repository.BotTokenUsageRepository;
+import com.chatapp.chatservice.bot.clinic.repository.DoctorAvailabilityRepository;
+import com.chatapp.chatservice.bot.clinic.repository.DoctorRepository;
 import com.chatapp.chatservice.repository.AppUserRepository;
 import org.mockito.Mockito;
 import org.springframework.boot.test.context.TestConfiguration;

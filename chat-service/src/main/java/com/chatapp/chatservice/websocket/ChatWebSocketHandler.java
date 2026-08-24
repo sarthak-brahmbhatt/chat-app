@@ -1,9 +1,10 @@
 package com.chatapp.chatservice.websocket;
 
-import com.chatapp.chatservice.bot.BotDirectory;
-import com.chatapp.chatservice.bot.BotReply;
-import com.chatapp.chatservice.bot.DoctorAssistantBotService;
+import com.chatapp.chatservice.bot.routing.BotDirectory;
+import com.chatapp.chatservice.bot.routing.BotReply;
+import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
 import com.chatapp.chatservice.dto.ChatMessageRequest;
+import com.chatapp.chatservice.entity.UserType;
 import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
@@ -235,8 +236,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // not a special case bolted onto the protocol. Only the DELIVERY differs,
         // and it has to: a ConnectionRegistry lookup for the bot can only ever
         // miss, since the bot has no browser and therefore no session.
-        if (botDirectory.isBot(request.recipientId())) {
-            handleBotMessage(session, senderId, request, sentAt);
+        Optional<UserType> botKind = botDirectory.botKindOf(request.recipientId());
+        if (botKind.isPresent()) {
+            switch (botKind.get()) {
+                case BOT -> handleBotMessage(session, senderId, request, sentAt);
+                case BOT_TOOL -> handleToolBotMessage(session, senderId, request);
+                default -> log.warn("Recipient {} resolved to unroutable bot kind {}",
+                        request.recipientId(), botKind.get());
+            }
             return;
         }
 
@@ -325,6 +332,39 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // message.
         IncomingChatMessage incoming = new IncomingChatMessage(
                 "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
+        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
+    }
+
+    /**
+     * The Version 2 tool-calling bot — <b>not built yet</b>.
+     *
+     * <p>The user, the routing branch and the shared clinic/conversation
+     * packages are all in place; only the turn logic is missing. It will live
+     * in {@code com.chatapp.chatservice.bot.toolcalling} and will reuse
+     * {@code AvailabilityService} and {@code BookingService} unchanged — the
+     * difference is entirely in HOW the model reaches them: as tool calls
+     * returning computed answers, rather than a prompt stuffed with raw data
+     * for the model to reason over itself.
+     *
+     * <p>Answers honestly in the meantime rather than staying silent. The bot
+     * is visible in the user list from the moment it is seeded, so somebody
+     * will message it before the logic exists, and a single tick followed by
+     * nothing forever is a worse answer than saying so.
+     */
+    private void handleToolBotMessage(
+            WebSocketSession session, String senderId, ChatMessageRequest request) throws IOException {
+        String botId = request.recipientId();
+        log.info("Message for the tool-calling bot from user {} — not implemented yet", senderId);
+
+        Instant repliedAt = Instant.now();
+        String replyId = java.util.UUID.randomUUID().toString();
+        String text = "The tool-calling assistant isn't built yet — try DoctorAssistant for now.";
+
+        chatMessageService.persistBotConversationMessage(replyId, botId, senderId, text, repliedAt);
+        chatMessageService.markDelivered(request.messageId());
+        sendDoubleTickIfConnected(senderId, request.messageId());
+
+        IncomingChatMessage incoming = new IncomingChatMessage("incoming_message", replyId, botId, text, repliedAt);
         session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
     }
 

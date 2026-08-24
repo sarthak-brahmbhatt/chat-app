@@ -39,8 +39,27 @@ flowchart TB
 
 ## 2. Where each responsibility lives
 
-All paths under
-`chat-service/src/main/java/com/chatapp/chatservice/`.
+All paths under `chat-service/src/main/java/com/chatapp/chatservice/`.
+
+The `bot` package is organised **by concern, not by Java kind** — records and
+interfaces sit next to the code that uses them. That layout is what makes a
+second bot cheap: `clinic/` and `conversation/` are shared untouched, and each
+version gets its own folder.
+
+```
+bot/
+├── clinic/            SHARED — doctors, availability, appointments, booking
+├── conversation/      SHARED — chain state, token usage, prompt log
+├── routing/           SHARED — which bot is this message for
+├── promptstuffing/    VERSION 1 — everything in this document
+└── toolcalling/       VERSION 2 — not built yet
+```
+
+**`BookingService` takes a `BookingRequest`, not a `BotDecision`.** That
+indirection exists so the clinic layer knows nothing about any particular bot's
+reply format: Version 1 builds a request from its structured output, Version 2
+will build one from tool-call arguments, and both get identical validation and
+identical writes.
 
 ### The entry point
 
@@ -289,6 +308,13 @@ call hands the model that result instead of the raw inputs.
 - **Tool calling with the Responses API.** Item 2 of "the Chatbot has to be
   implemented using" in the requirement. **Version 1 does not satisfy the
   requirement without it.** It is also the fix for the availability error above.
+  - **Scaffolding is in place**: a seeded `BOT_TOOL` user
+    (`doctorassistant-tools`, "DoctorAssistant (Tools)"), a routing branch in
+    `ChatWebSocketHandler`, and the empty `bot.toolcalling` package. Messaging
+    it today gets an honest "not built yet" reply.
+  - The two bots run **side by side on purpose**, both visible in the user list,
+    both writing to the same `bot_token_usage` — so the cost difference can be
+    demonstrated on the same clinic data rather than described.
 
 ### Deliberately deferred
 

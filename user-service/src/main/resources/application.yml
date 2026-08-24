@@ -97,6 +97,11 @@ refresh-token:
 bot:
   username: ${BOT_USERNAME:doctorassistant}
   display-name: ${BOT_DISPLAY_NAME:DoctorAssistant}
+  # The Version 2 tool-calling bot — a SECOND seeded user, not a replacement.
+  # Both appear in the user list so the two approaches can be demoed side by
+  # side against the same clinic data.
+  tool-username: ${BOT_TOOL_USERNAME:doctorassistant-tools}
+  tool-display-name: ${BOT_TOOL_DISPLAY_NAME:DoctorAssistant (Tools)}
 
 server:
   port: 8080

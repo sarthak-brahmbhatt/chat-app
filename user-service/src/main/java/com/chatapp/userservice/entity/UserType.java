@@ -31,5 +31,21 @@ public enum UserType {
      * concerned the bot is just another user. This column is the ONLY thing
      * that distinguishes it, and only chat-service's routing branch looks.
      */
-    BOT
+    BOT,
+    /**
+     * The Version 2 appointment bot, reached through OpenAI tool calling
+     * instead of prompt stuffing.
+     *
+     * <p>A SECOND bot user, deliberately alongside {@link #BOT} rather than
+     * replacing it. Both are seeded, both appear in the user list, and both
+     * answer at the same time — so the two approaches can be demonstrated side
+     * by side against the same clinic data, which is the whole point of
+     * building the naive one first.
+     *
+     * <p>They share every table. Different bot user ids produce different
+     * conversation keys, so their chains, token usage and prompt logs sit in
+     * the same tables without colliding — and the token cost of one can be
+     * compared directly against the other.
+     */
+    BOT_TOOL
 }
