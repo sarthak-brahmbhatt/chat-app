@@ -91,6 +91,19 @@ public class BotPromptLog {
     @Column(name = "action", length = 20)
     private String action;
 
+    /**
+     * For the tool-calling bot: which tools this turn invoked, with their
+     * arguments and results. Null for the prompt-stuffing bot, which has none.
+     *
+     * <p>The two bots leave very different traces, and that contrast is the
+     * demonstration. Version 1's row carries a ~15KB prompt and no tool calls;
+     * Version 2's carries a small prompt and a list of exactly what it looked
+     * up. Same table, so the two are one query apart.
+     */
+    @Lob
+    @Column(name = "tool_calls", columnDefinition = "TEXT")
+    private String toolCalls;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -107,6 +120,7 @@ public class BotPromptLog {
             String userMessage,
             String replyToUser,
             String action,
+            String toolCalls,
             Instant createdAt) {
         this.conversationKey = conversationKey;
         this.turnNumber = turnNumber;
@@ -117,6 +131,7 @@ public class BotPromptLog {
         this.userMessage = userMessage;
         this.replyToUser = replyToUser;
         this.action = action;
+        this.toolCalls = toolCalls;
         this.createdAt = createdAt;
     }
 
@@ -158,6 +173,10 @@ public class BotPromptLog {
 
     public String getAction() {
         return action;
+    }
+
+    public String getToolCalls() {
+        return toolCalls;
     }
 
     public Instant getCreatedAt() {

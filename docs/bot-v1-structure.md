@@ -52,7 +52,7 @@ bot/
 ├── conversation/      SHARED — chain state, token usage, prompt log
 ├── routing/           SHARED — which bot is this message for
 ├── promptstuffing/    VERSION 1 — everything in this document
-└── toolcalling/       VERSION 2 — not built yet
+└── toolcalling/       VERSION 2 — tool calling (built)
 ```
 
 **`BookingService` takes a `BookingRequest`, not a `BotDecision`.** That
@@ -303,15 +303,17 @@ call hands the model that result instead of the raw inputs.
 
 ## 5. What is remaining
 
-### Required, not built
+### Both requirement items are now satisfied
 
-- **Tool calling with the Responses API.** Item 2 of "the Chatbot has to be
-  implemented using" in the requirement. **Version 1 does not satisfy the
-  requirement without it.** It is also the fix for the availability error above.
-  - **Scaffolding is in place**: a seeded `BOT_TOOL` user
-    (`doctorassistant-tools`, "DoctorAssistant (Tools)"), a routing branch in
-    `ChatWebSocketHandler`, and the empty `bot.toolcalling` package. Messaging
-    it today gets an honest "not built yet" reply.
+- Responses API (Version 1, this document) and **tool calling** (Version 2,
+  CLAUDE.md 3.10). Measured on the same conversations: average prompt
+  **14,915 → 3,341 chars**, average input **5,536 → 2,768 tokens/turn**. The
+  availability error above and the cross-patient leak both become structurally
+  unreachable in Version 2 rather than prompted against.
+  - **Now built** — see CLAUDE.md 3.10. `bot/toolcalling/` holds five tools
+    (`list_specialties`, `find_doctors`, `get_available_slots`,
+    `get_my_appointments`, `book_appointment`), the loop, and its own small
+    prompt. Chat with **DoctorAssistant (Tools)** in the user list.
   - The two bots run **side by side on purpose**, both visible in the user list,
     both writing to the same `bot_token_usage` — so the cost difference can be
     demonstrated on the same clinic data rather than described.

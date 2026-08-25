@@ -3,6 +3,7 @@ package com.chatapp.chatservice.websocket;
 import com.chatapp.chatservice.bot.routing.BotDirectory;
 import com.chatapp.chatservice.bot.routing.BotReply;
 import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
+import com.chatapp.chatservice.bot.toolcalling.ToolCallingBotService;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.entity.UserType;
 import com.chatapp.chatservice.dto.TickAck;
@@ -74,6 +75,9 @@ class BotRoutingTest {
     private DoctorAssistantBotService doctorAssistantBotService;
 
     @Mock
+    private ToolCallingBotService toolCallingBotService;
+
+    @Mock
     private WebSocketSession session;
 
     private ChatWebSocketHandler handler;
@@ -99,7 +103,7 @@ class BotRoutingTest {
         handler = new ChatWebSocketHandler(
                 jwtValidator, new ConnectionRegistry(), objectMapper,
                 new ChatMessagePublisher(kafkaTemplate), chatMessageService,
-                botDirectory, doctorAssistantBotService);
+                botDirectory, doctorAssistantBotService, toolCallingBotService);
 
         sessionAttributes = new HashMap<>();
         when(session.getAttributes()).thenReturn(sessionAttributes);

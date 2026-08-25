@@ -287,6 +287,9 @@ public class DoctorAssistantBotService {
                     userMessage,
                     replyText,
                     turn.decision().action().name(),
+                    // No tool calls — that column belongs to the other bot, and
+                    // its emptiness here is part of the comparison.
+                    null,
                     clock.instant()));
         } catch (RuntimeException e) {
             log.warn("Could not write prompt log for conversation {} turn {}: {}",

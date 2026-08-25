@@ -2,6 +2,7 @@ package com.chatapp.chatservice.websocket;
 
 import com.chatapp.chatservice.bot.routing.BotDirectory;
 import com.chatapp.chatservice.bot.routing.BotReply;
+import com.chatapp.chatservice.bot.toolcalling.ToolCallingBotService;
 import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
 import com.chatapp.chatservice.dto.ChatMessageRequest;
 import com.chatapp.chatservice.entity.UserType;
@@ -81,6 +82,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final ChatMessageService chatMessageService;
     private final BotDirectory botDirectory;
     private final DoctorAssistantBotService doctorAssistantBotService;
+    private final ToolCallingBotService toolCallingBotService;
 
     public ChatWebSocketHandler(
             JwtValidator jwtValidator,
@@ -89,7 +91,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             ChatMessagePublisher chatMessagePublisher,
             ChatMessageService chatMessageService,
             BotDirectory botDirectory,
-            DoctorAssistantBotService doctorAssistantBotService) {
+            DoctorAssistantBotService doctorAssistantBotService,
+            ToolCallingBotService toolCallingBotService) {
         this.jwtValidator = jwtValidator;
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
@@ -97,6 +100,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.chatMessageService = chatMessageService;
         this.botDirectory = botDirectory;
         this.doctorAssistantBotService = doctorAssistantBotService;
+        this.toolCallingBotService = toolCallingBotService;
     }
 
     @Override
@@ -240,7 +244,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (botKind.isPresent()) {
             switch (botKind.get()) {
                 case BOT -> handleBotMessage(session, senderId, request, sentAt);
-                case BOT_TOOL -> handleToolBotMessage(session, senderId, request);
+                case BOT_TOOL -> handleToolBotMessage(session, senderId, request, sentAt);
                 default -> log.warn("Recipient {} resolved to unroutable bot kind {}",
                         request.recipientId(), botKind.get());
             }
@@ -336,35 +340,30 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
-     * The Version 2 tool-calling bot — <b>not built yet</b>.
+     * The Version 2 tool-calling bot (CLAUDE.md 3.10).
      *
-     * <p>The user, the routing branch and the shared clinic/conversation
-     * packages are all in place; only the turn logic is missing. It will live
-     * in {@code com.chatapp.chatservice.bot.toolcalling} and will reuse
-     * {@code AvailabilityService} and {@code BookingService} unchanged — the
-     * difference is entirely in HOW the model reaches them: as tool calls
-     * returning computed answers, rather than a prompt stuffed with raw data
-     * for the model to reason over itself.
-     *
-     * <p>Answers honestly in the meantime rather than staying silent. The bot
-     * is visible in the user list from the moment it is seeded, so somebody
-     * will message it before the logic exists, and a single tick followed by
-     * nothing forever is a worse answer than saying so.
+     * <p>Identical in shape to {@link #handleBotMessage} above — same direct
+     * writes, same tick timing, same envelope — because everything except how
+     * the model reaches the clinic is deliberately held constant. That is what
+     * makes the two comparable in a demo: put them side by side and the only
+     * difference you can observe is the one that matters.
      */
     private void handleToolBotMessage(
-            WebSocketSession session, String senderId, ChatMessageRequest request) throws IOException {
+            WebSocketSession session, String senderId, ChatMessageRequest request, Instant sentAt) throws IOException {
         String botId = request.recipientId();
-        log.info("Message for the tool-calling bot from user {} — not implemented yet", senderId);
+
+        BotReply reply = toolCallingBotService.handleUserMessage(
+                senderId, botId, request.messageId(), request.content(), sentAt);
 
         Instant repliedAt = Instant.now();
-        String replyId = java.util.UUID.randomUUID().toString();
-        String text = "The tool-calling assistant isn't built yet — try DoctorAssistant for now.";
+        chatMessageService.persistBotConversationMessage(
+                reply.messageId(), botId, senderId, reply.content(), repliedAt);
 
-        chatMessageService.persistBotConversationMessage(replyId, botId, senderId, text, repliedAt);
         chatMessageService.markDelivered(request.messageId());
         sendDoubleTickIfConnected(senderId, request.messageId());
 
-        IncomingChatMessage incoming = new IncomingChatMessage("incoming_message", replyId, botId, text, repliedAt);
+        IncomingChatMessage incoming = new IncomingChatMessage(
+                "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
         session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
     }
 

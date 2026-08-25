@@ -2,6 +2,7 @@ package com.chatapp.chatservice.websocket;
 
 import com.chatapp.chatservice.bot.routing.BotDirectory;
 import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
+import com.chatapp.chatservice.bot.toolcalling.ToolCallingBotService;
 import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
@@ -101,6 +102,9 @@ class ChatWebSocketHandlerTest {
     @Mock
     private DoctorAssistantBotService doctorAssistantBotService;
 
+    @Mock
+    private ToolCallingBotService toolCallingBotService;
+
     private Map<String, Object> sessionAttributes;
 
     @BeforeEach
@@ -148,7 +152,7 @@ class ChatWebSocketHandlerTest {
         ChatMessagePublisher chatMessagePublisher = new ChatMessagePublisher(kafkaTemplate);
         handler = new ChatWebSocketHandler(
                 jwtValidator, connectionRegistry, objectMapper, chatMessagePublisher, chatMessageService,
-                botDirectory, doctorAssistantBotService);
+                botDirectory, doctorAssistantBotService, toolCallingBotService);
 
         sessionAttributes = new HashMap<>();
         // lenient(): not every test in this class uses the shared `session`

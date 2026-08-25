@@ -751,6 +751,92 @@ replies that it is unavailable.
   wiping the conversation's memory.
 
 
+### 3.10 DoctorAssistant bot — Version 2, tool calling (build-order step 19)
+
+The same clinic, reached through OpenAI **tool calling** instead of prompt
+stuffing. Satisfies the second half of the source requirement's "implemented
+using" list ([`docs/bot-requirements.md`](docs/bot-requirements.md)).
+
+- **A SECOND bot, not a replacement.** `user_type = BOT_TOOL`, username
+  `doctorassistant-tools`, display name "DoctorAssistant (Tools)". Both bots
+  are seeded, both appear in the user list, both answer at once, and both write
+  to the same `bot_token_usage` and `bot_prompt_log`. The comparison is then a
+  single query rather than an assertion — which was the whole reason for
+  building the naive one first.
+- **Everything except the model interaction is held constant** — same direct
+  writes bypassing Kafka, same tick timing, same envelope, same
+  `ChatWebSocketHandler` shape. Put the two side by side in a demo and the only
+  observable difference is the one that matters.
+
+**What is shared, and what is not.** The package was reorganised by concern for
+this: `bot/clinic` (doctors, availability, appointments, booking) and
+`bot/conversation` (chain state, token usage, prompt log) are used unchanged by
+both; `bot/promptstuffing` and `bot/toolcalling` hold what differs.
+`BookingService` was changed to take a `BookingRequest` rather than Version 1's
+`BotDecision`, so the shared clinic layer knows nothing about any bot's reply
+format.
+
+**The five tools** (`ClinicTool`, executed by `ClinicToolExecutor`):
+`list_specialties`, `find_doctors`, `get_available_slots`,
+`get_my_appointments`, `book_appointment`. All `strict: true`; optional
+arguments are expressed as nullable types, since strict mode requires every
+property to be listed as required.
+
+**Two of Version 1's failures become structurally unreachable**, which is the
+substantive argument for this version:
+
+- **The availability arithmetic.** V1 was handed the schedule and the bookings
+  and asked to subtract — and got it wrong, offering a slot that was in its own
+  booked list. `get_available_slots` returns what `AvailabilityService` already
+  computed. There is no arithmetic left to get wrong.
+- **The cross-patient leak.** V1 was handed every patient's bookings in one
+  unattributed list and misattributed them. `get_my_appointments` takes **no
+  patient argument at all** — `ClinicToolExecutor` closes over the authenticated
+  user id from the session. The model cannot ask about someone else because the
+  question cannot be expressed. Asserted directly in `ClinicToolExecutorTest`.
+
+**The safety property is unchanged.** `book_appointment` still goes through
+`BookingService`, so every validation, the re-check, and the unique constraint
+apply identically. The model requests a booking; it still cannot make one.
+
+**The loop** (`OpenAiToolCallingBrain`): send prompt + tools → while the
+response contains function calls, execute them and send the outputs back chained
+to that response → the response with no calls carries the reply. Capped at
+`MAX_ROUNDS = 5`; hitting it is a bug worth seeing, not a normal path.
+
+- **`instructions` is re-sent on EVERY round.** Found live: it applies to one
+  call and is NOT carried forward by `previous_response_id` — the chain carries
+  the conversation, not the rules. Sending it only on the first round left the
+  round that actually writes the reply with no behavioural prompt at all, which
+  showed as a skipped greeting and markdown formatting the prompt forbids.
+- Token usage is summed across every round, or the comparison would flatter
+  Version 2 by counting a fraction of what it spent.
+
+**Measured, on the same clinic and the same conversations:**
+
+| | V1 prompt-stuffing | V2 tool-calling |
+|---|---|---|
+| avg system prompt | **14,915 chars** | **3,341 chars** |
+| avg input tokens/turn | **5,536** | **2,768** |
+| range | 4,741 – 7,285 | 1,349 – 3,807 |
+
+V1's floor rises with every doctor added, because the whole clinic is in every
+prompt. V2's does not — it pays per lookup instead, and only for what the
+conversation actually needed.
+
+**Accepted tradeoffs:**
+- **Latency is worse, and visibly so.** A turn needing three rounds is three
+  sequential API calls: 10-18s observed, against 3-6s for V1. The single tick
+  sits there for all of it. Streaming (§5) would hide some of this.
+- **`bot_prompt_log.tool_calls`** (new column, null for V1) records the trace.
+  Without it V2's log would show a small prompt and a reply with nothing in
+  between — the tool calls ARE what it looked at, and the cross-patient leak
+  showed what happens when a turn cannot be reconstructed.
+- The two bots duplicate their orchestration deliberately rather than sharing a
+  base class. They are meant to be read side by side, and an abstraction over
+  both would hide the difference the pair exists to demonstrate.
+
+
 ## 4. Finalized API / sequence flows
 
 - `POST /register` (username, password, firstName, lastName) → User service checks
@@ -915,13 +1001,9 @@ replies that it is unavailable.
 - Detailed HA/DR design
 - Multi-instance registry + pub/sub implementation (only needed once single-instance
   capacity is proven insufficient)
-- **Bot Version 2's tool calling** — deferred, but **NOT optional**. The source
-  requirement ([`docs/bot-requirements.md`](docs/bot-requirements.md)) lists
-  "Tool Calling with Responses API" as something the bot has to be implemented
-  using, alongside the Responses API itself. So Version 1 alone does not meet
-  the requirement; the two were sequenced, not traded off. Version 1 exists to
-  make the naive approach's limits measurable before the tools that fix them
-  land — see 3.9's note on what it already got wrong in live testing.
+- ~~Bot Version 2's tool calling~~ — **BUILT, see 3.10.** Both requirement items
+  are now satisfied: Responses API (3.9) and tool calling (3.10). The two bots
+  run side by side so the difference is demonstrable rather than described.
 - **Bot LONG-TERM conversation memory** — "remembers you from days ago". Version
   1's `previous_response_id` chaining is NOT this and must not be mistaken for
   it (3.9): OpenAI's retention of a response id expires, and an expired chain is
@@ -1084,3 +1166,10 @@ replies that it is unavailable.
     in `ChatWebSocketHandler`. No frontend change of any kind. Version 2's tool
     calling is deliberately deferred until the naive approach's cost is
     measurable in `bot_token_usage` rather than asserted (§5).
+19. DoctorAssistant bot, Version 2 — tool calling (see 3.10). A second
+    BOT_TOOL user alongside Version 1, sharing the clinic and conversation
+    packages unchanged. Measured on the same conversations: average prompt
+    14,915 -> 3,341 chars, average input 5,536 -> 2,768 tokens per turn, and
+    two of Version 1's live failures — the availability arithmetic and the
+    cross-patient leak — become structurally unreachable rather than merely
+    prompted against.

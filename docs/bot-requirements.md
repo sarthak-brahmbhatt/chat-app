@@ -79,7 +79,7 @@ rather than taking a summary's word for it.
 | Requirement | Where it lives |
 |---|---|
 | Responses API | `bot/OpenAiBotBrain.java` — official `com.openai:openai-java` SDK, `client.responses().create(...)` |
-| **Tool calling** | **NOT YET BUILT — Version 2.** See the note below; this is required scope, not optional. |
+| **Tool calling** | `bot/toolcalling/` — five tools over the Responses API, Version 2. Built. |
 | Doctors, specialty, availability in a database | `doctors`, `doctor_availability` (recurring weekly pattern, 30-min slots), seeded by `bot/DoctorSeedData.java` |
 | Conversation (i) — named doctor, time unavailable, alternative offered | `bot/BotPromptBuilder.java`, "OFFERING TIMES" |
 | Conversation (ii) — specialty not offered, then close out | `bot/BotPromptBuilder.java`, "SPECIALTIES"; driven by the DISTINCT specialty list read from the database each turn |
@@ -98,6 +98,9 @@ data into the prompt each turn. That is knowingly the naive approach, chosen so
 its limits get measured rather than described — see `bot_token_usage` and
 CLAUDE.md 3.9.
 
-Version 2 (not built) adds tool calling, which is where the requirement is
-actually satisfied in full. **Version 1 alone does not meet requirement item 2
-of "implemented using".**
+Version 2 (**built** — CLAUDE.md 3.10) adds tool calling. Both bots are seeded
+and run side by side so the difference can be demonstrated on the same clinic
+data: average prompt 14,915 → 3,341 chars, average input 5,536 → 2,768 tokens
+per turn, and two of Version 1's live failures become structurally unreachable.
+
+Both requirement items under "implemented using" are therefore satisfied.
