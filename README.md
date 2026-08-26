@@ -146,14 +146,14 @@ cd chat-app
 docker compose up -d
 ```
 
-This brings up MySQL, Redis, Kafka, `user-service` (`:8081`), and
-`chat-service` (`:8082`). Then run the frontend separately:
+That is the whole stack: MySQL, Redis, Kafka, `user-service` (`:8081`),
+`chat-service` (`:8082`) and the Angular dev server (`:4200`). Nothing needs to
+be started separately, and everything carries `restart: unless-stopped`, so a
+crash or a Docker Desktop restart brings it back on its own.
 
-```bash
-cd frontend
-npm install
-npm start
-```
+The first run installs the frontend's dependencies inside the container and
+takes a few minutes; later starts are quick. Source is bind-mounted, so editing
+a component still hot-reloads.
 
 The app is served at `http://localhost:4200`. Register a couple of users to
 start a conversation.
