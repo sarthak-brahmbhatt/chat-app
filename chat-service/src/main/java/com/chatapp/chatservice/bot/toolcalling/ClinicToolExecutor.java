@@ -5,7 +5,6 @@ import com.chatapp.chatservice.bot.clinic.BookingOutcome;
 import com.chatapp.chatservice.bot.clinic.BookingRequest;
 import com.chatapp.chatservice.bot.clinic.BookingService;
 import com.chatapp.chatservice.bot.clinic.FreeSlot;
-import com.chatapp.chatservice.bot.clinic.entity.Appointment;
 import com.chatapp.chatservice.bot.clinic.entity.AppointmentStatus;
 import com.chatapp.chatservice.bot.clinic.entity.Doctor;
 import com.chatapp.chatservice.bot.clinic.entity.DoctorAvailability;
@@ -17,8 +16,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;

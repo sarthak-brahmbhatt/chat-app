@@ -12,6 +12,7 @@ import com.openai.models.responses.ResponseFunctionToolCall;
 import com.openai.models.responses.ResponseInputItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -61,6 +62,10 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
     private final OpenAIClient client;
     private final String model;
 
+    // @Autowired is load-bearing now that a second (test-only) constructor
+    // exists: with more than one, Spring cannot pick and falls back to looking
+    // for a no-arg constructor, which fails at context startup.
+    @Autowired
     public OpenAiToolCallingBrain(
             @Value("${openai.api-key}") String apiKey,
             @Value("${openai.model}") String model,
@@ -76,6 +81,21 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
                     .build();
             log.info("Tool-calling bot configured with model {}", model);
         }
+    }
+
+    /**
+     * Test seam: supply the client directly.
+     *
+     * <p>The public constructor builds its own client from the API key, which
+     * makes the loop — rounds, token summing, the round cap, matching call ids —
+     * untestable without a billable network call. That logic is the substance of
+     * Version 2 and is worth pinning down, so this exists purely for
+     * {@code OpenAiToolCallingBrainTest}. Package-private so nothing in
+     * production can reach it.
+     */
+    OpenAiToolCallingBrain(OpenAIClient client, String model) {
+        this.client = client;
+        this.model = model;
     }
 
     @Override
