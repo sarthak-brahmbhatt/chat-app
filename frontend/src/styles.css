@@ -6,6 +6,29 @@
   box-sizing: border-box;
 }
 
+/* ---- design tokens -------------------------------------------------------
+   The two assistants each get an accent, and those two colours are the only
+   strongly saturated things in the interface — everything else is a cool grey
+   so the bots read as the distinct participants they are.
+   bot-1 = amber  (Version 1, prompt stuffing)
+   bot-2 = teal   (Version 2, tool calling)
+--------------------------------------------------------------------------- */
+:root {
+  --ink: #16202b;
+  --ink-soft: #5a6672;
+  --ink-faint: #8b96a1;
+  --paper: #f5f7f9;
+  --surface: #ffffff;
+  --surface-alt: #eef2f5;
+  --line: #dde4ea;
+  --accent: #2f6fd0;
+  --bot-1: #b1710d;
+  --bot-1-soft: #fdf1dc;
+  --bot-2: #0f7b83;
+  --bot-2-soft: #dcf0f1;
+  --radius: 10px;
+}
+
 body {
   margin: 0;
   font-family: system-ui, -apple-system, sans-serif;
@@ -87,10 +110,10 @@ button.secondary {
 }
 
 .sidebar {
-  width: 320px;
+  width: 300px;
   flex-shrink: 0;
-  border-right: 1px solid #ddd;
-  background: white;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -100,36 +123,140 @@ button.secondary {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 1rem;
-  border-bottom: 1px solid #eee;
+  gap: 0.75rem;
+  padding: 1rem 1.1rem;
+  border-bottom: 1px solid var(--line);
 }
 
 .sidebar-header h1 {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
 
 .sidebar-status {
-  padding: 1rem;
-  color: #666;
+  padding: 1rem 1.1rem;
+  color: var(--ink-soft);
+}
+
+/* Section label above each group. Small caps, quiet — it separates the pinned
+   assistants from everyone else without competing with the names. */
+.list-heading {
+  margin: 0;
+  padding: 1rem 1.1rem 0.4rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
 
 .user-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
+/* A real <button>, so it needs its own resets before it looks like a row. */
 .user-list-item {
+  width: 100%;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #eee;
+  gap: 0.7rem;
+  padding: 0.6rem 0.6rem;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.user-list-item:hover {
+  background: var(--surface-alt);
 }
 
 .user-list-item.active {
-  background: #eef2ff;
+  background: var(--surface-alt);
+}
+
+.avatar {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  background: var(--surface-alt);
+  color: var(--ink-soft);
+}
+
+.avatar-person {
+  background: #e4eaf0;
+}
+
+.entry-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.entry-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.entry-sub {
+  font-size: 0.74rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The two assistants. The accent lives on the numbered disc and on the active
+   state, so which bot you are talking to is legible at a glance and stays
+   consistent with the chat header. */
+.is-bot .entry-sub {
+  font-weight: 600;
+}
+
+.user-list-item.bot-1 .avatar {
+  background: var(--bot-1-soft);
+  color: var(--bot-1);
+}
+
+.user-list-item.bot-1 .entry-sub {
+  color: var(--bot-1);
+}
+
+.user-list-item.bot-1.active {
+  background: var(--bot-1-soft);
+}
+
+.user-list-item.bot-2 .avatar {
+  background: var(--bot-2-soft);
+  color: var(--bot-2);
+}
+
+.user-list-item.bot-2 .entry-sub {
+  color: var(--bot-2);
+}
+
+.user-list-item.bot-2.active {
+  background: var(--bot-2-soft);
 }
 
 .chat-panel {
@@ -184,18 +311,45 @@ button.secondary {
 .chat-header {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--line);
   flex-shrink: 0;
 }
 
 .chat-header h1 {
   margin: 0;
-  font-size: 1.25rem;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+/* Which assistant this is, carrying the same accent as the sidebar entry —
+   with two bots answering, the open conversation should say which one. */
+.header-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--ink-soft);
+}
+
+.header-badge.bot-1 {
+  background: var(--bot-1-soft);
+  color: var(--bot-1);
+}
+
+.header-badge.bot-2 {
+  background: var(--bot-2-soft);
+  color: var(--bot-2);
 }
 
 .back-link {
-  color: #2563eb;
+  color: var(--ink-soft);
   text-decoration: none;
   font-size: 1.25rem;
   line-height: 1;
@@ -219,10 +373,11 @@ button.secondary {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 0.75rem;
-  background: #f0f0f0;
-  border-radius: 6px;
-  margin-bottom: 1rem;
+  padding: 0.9rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 0.9rem;
 }
 
 .loading-older {
@@ -233,29 +388,73 @@ button.secondary {
 }
 
 .bubble {
-  max-width: 70%;
-  padding: 0.5rem 0.75rem;
-  border-radius: 10px;
+  max-width: 72%;
+  padding: 0.5rem 0.7rem;
+  border-radius: 12px;
   display: flex;
   align-items: flex-end;
-  gap: 0.4rem;
+  gap: 0.45rem;
+  line-height: 1.45;
+  box-shadow: 0 1px 1px rgba(22, 32, 43, 0.04);
+}
+
+/* Preserves the line breaks the bot writes, which plain inline text collapses
+   — its replies read as several short sentences and should look like it. */
+.bubble-text {
+  white-space: pre-wrap;
 }
 
 .bubble.sent {
   align-self: flex-end;
-  background: #2563eb;
+  background: var(--accent);
   color: white;
+  border-bottom-right-radius: 4px;
 }
 
 .bubble.received {
   align-self: flex-start;
-  background: white;
-  border: 1px solid #ddd;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+}
+
+/* ---- a reply being written (CLAUDE.md 3.10) -----------------------------
+   Only the tool-calling bot streams. The caret is the whole indicator: it
+   blinks while text is arriving and disappears when the finished message
+   replaces the bubble.
+-------------------------------------------------------------------------- */
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--ink-soft);
+  animation: caret-blink 1s step-end infinite;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* "Checking availability…" — shown in place of the text while the bot is
+   calling tools, which is when it writes nothing at all. */
+.bot-status {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret {
+    animation: none;
+  }
 }
 
 .timestamp {
-  font-size: 0.7rem;
-  opacity: 0.7;
+  font-size: 0.68rem;
+  opacity: 0.65;
   white-space: nowrap;
   align-self: flex-end;
 }
@@ -283,4 +482,19 @@ button.secondary {
 
 .composer input {
   flex: 1;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.composer input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.composer button {
+  padding: 0.6rem 1.1rem;
+  border-radius: var(--radius);
 }

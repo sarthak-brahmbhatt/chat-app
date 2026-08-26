@@ -1,28 +1,67 @@
 <div class="sidebar-header">
-  <h1>Users</h1>
+  <h1>Super Clinic</h1>
   <button class="secondary" (click)="logout()">Log out</button>
 </div>
 
-<!--
-  @if / @else if / @else — Angular's built-in control-flow syntax
-  (17+), compiled directly rather than requiring an NgIf directive import.
--->
 @if (loading()) {
   <p class="sidebar-status">Loading…</p>
 } @else if (errorMessage()) {
   <p class="sidebar-status error">{{ errorMessage() }}</p>
-} @else if (users().length === 0) {
-  <p class="sidebar-status">No other users found.</p>
 } @else {
-  <ul class="user-list">
-    <!-- @for requires a `track` expression — how Angular identifies which
-         DOM node corresponds to which item across re-renders, similar in
-         spirit to React's `key`. user.id is unique and stable, a natural fit. -->
-    @for (user of users(); track user.id) {
-      <li class="user-list-item" [class.active]="isActive(user)">
-        <span>{{ user.firstName }} {{ user.lastName }} ({{ user.username }})</span>
-        <button (click)="startChat(user)">Start Chat</button>
-      </li>
-    }
-  </ul>
+  <!--
+    The two assistants, pinned above everyone else and numbered 1 and 2 —
+    they are Version 1 and Version 2 of the same bot, so the order carries
+    meaning and the subtitle says which approach each one uses.
+
+    Each row is a real <button>, not a clickable <li>: it is an action, so it
+    should be reachable by Tab and activate on Enter without any extra
+    handlers. The list semantics stay on the ul/li around it.
+  -->
+  @if (bots().length > 0) {
+    <p class="list-heading">Assistants</p>
+    <ul class="user-list">
+      @for (bot of bots(); track bot.id; let i = $index) {
+        <li>
+          <button
+            type="button"
+            class="user-list-item is-bot"
+            [class.bot-1]="botAccentClass(bot) === 'bot-1'"
+            [class.bot-2]="botAccentClass(bot) === 'bot-2'"
+            [class.active]="isActive(bot)"
+            (click)="startChat(bot)"
+          >
+            <span class="avatar" aria-hidden="true">{{ i + 1 }}</span>
+            <span class="entry-text">
+              <span class="entry-name">{{ bot.firstName }}</span>
+              <span class="entry-sub">{{ botSubtitle(bot) }}</span>
+            </span>
+          </button>
+        </li>
+      }
+    </ul>
+  }
+
+  @if (people().length > 0) {
+    <p class="list-heading">People</p>
+    <ul class="user-list">
+      @for (user of people(); track user.id) {
+        <li>
+          <button
+            type="button"
+            class="user-list-item"
+            [class.active]="isActive(user)"
+            (click)="startChat(user)"
+          >
+            <span class="avatar avatar-person" aria-hidden="true">{{ initialsOf(user) }}</span>
+            <span class="entry-text">
+              <span class="entry-name">{{ user.firstName }} {{ user.lastName }}</span>
+              <span class="entry-sub">{{ user.username }}</span>
+            </span>
+          </button>
+        </li>
+      }
+    </ul>
+  } @else if (bots().length === 0) {
+    <p class="sidebar-status">No other users found.</p>
+  }
 }

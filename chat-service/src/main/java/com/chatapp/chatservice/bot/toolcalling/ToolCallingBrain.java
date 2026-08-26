@@ -23,9 +23,16 @@ public interface ToolCallingBrain {
      * @param userMessage        what the patient just typed
      * @param previousResponseId the previous turn's id, or null to start fresh
      * @param executor           already scoped to the authenticated patient
+     * @param listener           receives text and status as the turn happens, so
+     *                           the user watches the reply being written rather
+     *                           than a tick. Pass {@link BotStreamListener#NOOP}
+     *                           to ignore progress; the returned turn is
+     *                           identical either way, because streaming is
+     *                           presentation and the final text is still
+     *                           returned in full
      * @throws com.chatapp.chatservice.bot.promptstuffing.BotBrainException if no
      *         usable reply could be produced
      */
     ToolTurn respond(String systemPrompt, String userMessage, String previousResponseId,
-                     ClinicToolExecutor executor);
+                     ClinicToolExecutor executor, BotStreamListener listener);
 }

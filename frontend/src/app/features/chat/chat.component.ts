@@ -1,10 +1,10 @@
-import { Component, DestroyRef, ElementRef, OnDestroy, OnInit, inject, signal, viewChild } from '@angular/core';
+import { Component, DestroyRef, ElementRef, OnDestroy, OnInit, computed, inject, signal, viewChild } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { filter } from 'rxjs';
 import { AuthService } from '../../core/auth.service';
 import { ChatService } from '../../core/chat.service';
-import { ConversationMessageResponse, IncomingChatMessage } from '../../models/chat.models';
+import { BotStreamEvent, ConversationMessageResponse, IncomingChatMessage } from '../../models/chat.models';
 
 interface ChatBubble {
   messageId: string;
@@ -16,6 +16,15 @@ interface ChatBubble {
   // once it does. 'received' bubbles just carry 'pending' unused — the
   // template only ever reads this for 'sent' bubbles.
   tickState: 'pending' | 'single' | 'double';
+  // Set on a received bubble that is still being written by the tool-calling
+  // bot. `true` from bot_stream_start until the real incoming_message lands
+  // and replaces the text — the template uses it to show a caret and, while
+  // `content` is still empty, the status note below.
+  streaming?: boolean;
+  // The bot's transient "Checking availability…" note. Shown INSTEAD of
+  // content while content is empty, because during tool calls the model
+  // writes no text at all and that is most of the wait.
+  status?: string;
   // ISO-8601 string. For a HISTORICAL bubble (toBubble) this is the real,
   // server-persisted sentAt. For a LIVE-RECEIVED bubble it's the sentAt the
   // server shared between the Kafka-persisted row and this live envelope
@@ -55,6 +64,29 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   readonly recipientId = signal('');
   readonly recipientLabel = signal('');
+
+  /**
+   * Which assistant this conversation is with, if any — forwarded through
+   * router state by UserListComponent so the header carries the same accent
+   * as the sidebar entry. With two bots answering, the open conversation
+   * should say at a glance which one you are talking to.
+   */
+  readonly recipientUserType = signal<string | null>(null);
+
+  readonly recipientBadge = computed(() => {
+    switch (this.recipientUserType()) {
+      case 'BOT':
+        return 'Prompt stuffing';
+      case 'BOT_TOOL':
+        return 'Tool calling';
+      default:
+        return null;
+    }
+  });
+
+  readonly recipientAccent = computed(() =>
+    this.recipientUserType() === 'BOT_TOOL' ? 'bot-2' : this.recipientUserType() === 'BOT' ? 'bot-1' : null,
+  );
   readonly bubbles = signal<ChatBubble[]>([]);
   readonly hasMoreHistory = signal(true);
   readonly loadingOlder = signal(false);
@@ -91,6 +123,16 @@ export class ChatComponent implements OnInit, OnDestroy {
     // straight across without any translation. Safe regardless of which
     // conversation is currently open: a tick for a message not in the
     // CURRENT `bubbles` array simply matches nothing and is a no-op.
+    // Streaming progress from the tool-calling bot. Same conversation filter as
+    // incoming messages: a frame for a chat that isn't open simply matches
+    // nothing and is a no-op.
+    this.chatService.botStream$
+      .pipe(
+        filter((event) => event.senderId === this.recipientId()),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((event) => this.handleBotStream(event));
+
     this.chatService.tickAcks$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((ack) => {
       this.bubbles.update((current) =>
         current.map((bubble) => (bubble.messageId === ack.messageId ? { ...bubble, tickState: ack.tick } : bubble)),
@@ -167,9 +209,62 @@ export class ChatComponent implements OnInit, OnDestroy {
       recipientFirstName?: string;
       recipientLastName?: string;
       recipientUsername?: string;
+      recipientUserType?: string;
     };
+    // Same source, same caveat: empty on a hard refresh, so the badge simply
+    // does not render then. Cosmetic, and it returns on the next click.
+    this.recipientUserType.set(state?.recipientUserType ?? null);
     const fullName = [state?.recipientFirstName, state?.recipientLastName].filter(Boolean).join(' ');
     return fullName || state?.recipientUsername || userId;
+  }
+
+  /**
+   * Grows the bot's bubble as its reply is written (CLAUDE.md 3.10).
+   *
+   * The bubble opened here is a PLACEHOLDER. When the real
+   * `incoming_message` arrives with the same messageId,
+   * handleIncomingMessage replaces its text and clears `streaming` — so the
+   * finished message is always the authoritative one, and a dropped chunk
+   * self-corrects.
+   */
+  private handleBotStream(event: BotStreamEvent): void {
+    // Guarded on history having loaded, exactly as live messages are: a frame
+    // arriving during the switch into this conversation would otherwise
+    // appear above messages that have not rendered yet.
+    if (!this.historyLoaded) {
+      return;
+    }
+
+    if (event.type === 'bot_stream_start') {
+      this.bubbles.update((current) => [
+        ...current,
+        {
+          messageId: event.messageId,
+          direction: 'received',
+          content: '',
+          tickState: 'pending',
+          streaming: true,
+          sentAt: new Date().toISOString(),
+        },
+      ]);
+      this.scrollToBottomIfAlreadyNearIt();
+      return;
+    }
+
+    this.bubbles.update((current) =>
+      current.map((bubble) => {
+        if (bubble.messageId !== event.messageId) {
+          return bubble;
+        }
+        if (event.type === 'bot_status') {
+          return { ...bubble, status: event.text ?? undefined };
+        }
+        // A delta. Appending clears any status — the note was a stand-in for
+        // text that has now started arriving.
+        return { ...bubble, content: bubble.content + (event.text ?? ''), status: undefined };
+      }),
+    );
+    this.scrollToBottomIfAlreadyNearIt();
   }
 
   private handleIncomingMessage(message: IncomingChatMessage): void {
@@ -178,10 +273,30 @@ export class ChatComponent implements OnInit, OnDestroy {
       // gap, not a silent bug.
       return;
     }
-    this.bubbles.update((current) => [
-      ...current,
-      { messageId: message.messageId, direction: 'received', content: message.content, tickState: 'pending', sentAt: message.sentAt },
-    ]);
+    const finished: ChatBubble = {
+      messageId: message.messageId,
+      direction: 'received',
+      content: message.content,
+      tickState: 'pending',
+      sentAt: message.sentAt,
+    };
+
+    this.bubbles.update((current) => {
+      // A streamed reply already has a placeholder bubble under this id (see
+      // handleBotStream). Replace it rather than appending, or the message
+      // would appear twice — once as it was written, once finished.
+      //
+      // Replacing is also what makes streaming safe to bolt on: whatever the
+      // chunks happened to build, THIS is the real message, so a dropped or
+      // duplicated frame cannot leave wrong text on screen.
+      const existing = current.findIndex((bubble) => bubble.messageId === message.messageId);
+      if (existing === -1) {
+        return [...current, finished];
+      }
+      const next = [...current];
+      next[existing] = finished;
+      return next;
+    });
     this.scrollToBottomIfAlreadyNearIt();
   }
 

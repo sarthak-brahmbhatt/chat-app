@@ -85,7 +85,8 @@ public class UserService {
      */
     public UserListResponse listUsers() {
         List<UserSummary> summaries = userRepository.findAll(Sort.by("id")).stream()
-                .map(user -> new UserSummary(user.getId(), user.getUsername(), user.getFirstName(), user.getLastName()))
+                .map(user -> new UserSummary(user.getId(), user.getUsername(), user.getFirstName(),
+                        user.getLastName(), user.getUserType().name()))
                 .toList();
 
         String message = summaries.isEmpty()

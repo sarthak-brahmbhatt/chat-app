@@ -107,7 +107,18 @@ public class ToolCallingBotService {
         this.clock = clock;
     }
 
-    public BotReply handleUserMessage(String userId, String botId, String messageId, String content, Instant sentAt) {
+    /**
+     * @param replyMessageId the id the bot's reply will have, minted by the
+     *                       CALLER rather than here. Streaming needs it before
+     *                       the turn finishes — every stream frame carries it so
+     *                       the client knows which bubble to grow — and the id
+     *                       of a message cannot be decided after the message has
+     *                       started arriving.
+     * @param listener       receives the reply as it is written; pass
+     *                       {@link BotStreamListener#NOOP} for none
+     */
+    public BotReply handleUserMessage(String userId, String botId, String messageId, String content,
+                                      Instant sentAt, String replyMessageId, BotStreamListener listener) {
         chatMessageService.persistBotConversationMessage(messageId, userId, botId, content, sentAt);
 
         String conversationKey = ConversationKey.of(userId, botId);
@@ -133,13 +144,13 @@ public class ToolCallingBotService {
         ToolTurn turn;
         try {
             turn = respondRecoveringFromExpiredChain(systemPrompt, content, previousResponseId,
-                    executor, conversationKey);
+                    executor, conversationKey, listener);
         } catch (BotBrainException e) {
             log.warn("Tool-calling turn failed for conversation {}: {}", conversationKey, e.getMessage(), e);
             return reply(FAILED_REPLY);
         }
 
-        String botMessageId = UUID.randomUUID().toString();
+        String botMessageId = replyMessageId;
         recordResponseId(conversationKey, turn.responseId());
         int turnNumber = recordTokenUsage(conversationKey, botMessageId, turn);
         recordPrompt(conversationKey, turnNumber, botMessageId, previousResponseId, turn, systemPrompt, content);
@@ -156,13 +167,16 @@ public class ToolCallingBotService {
      */
     private ToolTurn respondRecoveringFromExpiredChain(
             String systemPrompt, String content, String previousResponseId,
-            ClinicToolExecutor executor, String conversationKey) {
+            ClinicToolExecutor executor, String conversationKey, BotStreamListener listener) {
         try {
-            return brain.respond(systemPrompt, content, previousResponseId, executor);
+            return brain.respond(systemPrompt, content, previousResponseId, executor, listener);
         } catch (ExpiredConversationException e) {
             log.info("Conversation {} could not chain onto {} (expired server-side); starting a fresh chain.",
                     conversationKey, previousResponseId);
-            return brain.respond(promptBuilder.systemPrompt(true), content, null, executor);
+            // The retry streams too. Anything already sent is discarded by the
+            // client when the final incoming_message replaces the bubble, so a
+            // half-streamed abandoned attempt cannot leave stray text behind.
+            return brain.respond(promptBuilder.systemPrompt(true), content, null, executor, listener);
         }
     }
 

@@ -2,8 +2,10 @@ package com.chatapp.chatservice.websocket;
 
 import com.chatapp.chatservice.bot.routing.BotDirectory;
 import com.chatapp.chatservice.bot.routing.BotReply;
+import com.chatapp.chatservice.bot.toolcalling.BotStreamListener;
 import com.chatapp.chatservice.bot.toolcalling.ToolCallingBotService;
 import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
+import com.chatapp.chatservice.dto.BotStreamEvent;
 import com.chatapp.chatservice.dto.ChatMessageRequest;
 import com.chatapp.chatservice.entity.UserType;
 import com.chatapp.chatservice.dto.DeliveredAck;
@@ -29,6 +31,7 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * The WebSocket connection lifecycle, and how this class hooks into it
@@ -352,8 +355,22 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             WebSocketSession session, String senderId, ChatMessageRequest request, Instant sentAt) throws IOException {
         String botId = request.recipientId();
 
+        // Minted here, before the turn runs, because every stream frame has to
+        // carry the id of the message being written. The client opens a bubble
+        // on that id and grows it; it cannot do that for a message whose id is
+        // only decided once the text is finished.
+        String replyMessageId = UUID.randomUUID().toString();
+        sendStreamEvent(session, BotStreamEvent.start(replyMessageId, botId));
+        // An immediate holding note. The first round — the model deciding which
+        // tool it even needs — takes several seconds and produces neither text
+        // nor a tool call, so without this the bubble opens and then sits
+        // visibly empty for the longest single gap in the turn.
+        sendStreamEvent(session, BotStreamEvent.status(replyMessageId, botId, "Thinking…"));
+
         BotReply reply = toolCallingBotService.handleUserMessage(
-                senderId, botId, request.messageId(), request.content(), sentAt);
+                senderId, botId, request.messageId(), request.content(), sentAt,
+                replyMessageId,
+                streamListenerFor(session, replyMessageId, botId));
 
         Instant repliedAt = Instant.now();
         chatMessageService.persistBotConversationMessage(
@@ -362,9 +379,48 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         chatMessageService.markDelivered(request.messageId());
         sendDoubleTickIfConnected(senderId, request.messageId());
 
+        // Still sent in full, and still the authoritative message — the stream
+        // was a preview of exactly this. The client replaces the bubble's text
+        // with this content, so a dropped chunk, a client that ignores the
+        // stream types, or a stream that died halfway all end up correct.
         IncomingChatMessage incoming = new IncomingChatMessage(
                 "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
         session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
+    }
+
+    /**
+     * Turns the bot's progress into WebSocket frames on the caller's own socket.
+     *
+     * <p>Writes to {@code session} directly rather than through
+     * ConnectionRegistry: this runs synchronously inside the turn, on the thread
+     * that owns this socket, so the session in hand is by definition the live
+     * one. The registry lookup matters for the double tick, which fires seconds
+     * later and may find the user reconnected elsewhere.
+     *
+     * <p>Swallows its own IO failures. A frame that cannot be delivered is a
+     * cosmetic loss — the finished message is still persisted and still sent —
+     * and letting it escape would abandon a turn that was otherwise fine.
+     */
+    private BotStreamListener streamListenerFor(WebSocketSession session, String messageId, String botId) {
+        return new BotStreamListener() {
+            @Override
+            public void onStatus(String humanReadableStatus) {
+                sendStreamEvent(session, BotStreamEvent.status(messageId, botId, humanReadableStatus));
+            }
+
+            @Override
+            public void onTextDelta(String delta) {
+                sendStreamEvent(session, BotStreamEvent.delta(messageId, botId, delta));
+            }
+        };
+    }
+
+    private void sendStreamEvent(WebSocketSession session, BotStreamEvent event) {
+        try {
+            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(event)));
+        } catch (IOException | RuntimeException e) {
+            log.debug("Dropped a {} frame for message {}: {}", event.type(), event.messageId(), e.getMessage());
+        }
     }
 
     private void sendSingleTickAck(WebSocketSession session, String messageId) throws IOException {

@@ -132,8 +132,8 @@ class UserControllerTest {
     void listUsers_withValidToken_returns200WithUserList() throws Exception {
         when(jwtService.parseToken(anyString())).thenReturn(null);
         List<UserSummary> summaries = List.of(
-                new UserSummary(1L, "alice", "Alice", "Smith"),
-                new UserSummary(2L, "bob", "Bob", "Jones")
+                new UserSummary(1L, "alice", "Alice", "Smith", "USER"),
+                new UserSummary(2L, "bob", "Bob", "Jones", "USER")
         );
         when(userService.listUsers()).thenReturn(new UserListResponse(summaries, "2 user(s) found."));
 

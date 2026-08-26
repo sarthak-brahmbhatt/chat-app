@@ -10,6 +10,8 @@ import com.openai.models.responses.Response;
 import com.openai.models.responses.ResponseCreateParams;
 import com.openai.models.responses.ResponseFunctionToolCall;
 import com.openai.models.responses.ResponseInputItem;
+import com.openai.models.responses.ResponseStreamEvent;
+import com.openai.core.http.StreamResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -105,7 +107,7 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
 
     @Override
     public ToolTurn respond(String systemPrompt, String userMessage, String previousResponseId,
-                            ClinicToolExecutor executor) {
+                            ClinicToolExecutor executor, BotStreamListener listener) {
         if (!isConfigured()) {
             throw new BotBrainException("No OpenAI API key configured");
         }
@@ -126,7 +128,7 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
         }
         ClinicTool.allAsFunctionTools().forEach(first::addTool);
 
-        Response response = send(first.build(), previousResponseId);
+        Response response = send(first.build(), previousResponseId, listener);
         int rounds = 1;
 
         while (true) {
@@ -160,6 +162,11 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
             // Run every requested call, then hand all the outputs back at once.
             List<ResponseInputItem> outputs = new ArrayList<>();
             for (ResponseFunctionToolCall call : calls) {
+                // Told to the user before the lookup runs, not after. In a
+                // tool-calling turn the model writes no text at all while it is
+                // calling tools, and that is most of the wait — without this the
+                // window sits empty for the part that takes longest.
+                listener.onStatus(statusFor(call.name()));
                 String result = executor.execute(call.name(), call.arguments());
                 invocations.add(new ToolInvocation(call.name(), call.arguments(), result));
                 log.debug("Tool {} -> {}", call.name(),
@@ -191,14 +198,42 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
                     .store(true);
             ClinicTool.allAsFunctionTools().forEach(next::addTool);
 
-            response = send(next.build(), response.id());
+            response = send(next.build(), response.id(), listener);
             rounds++;
         }
     }
 
-    private Response send(ResponseCreateParams params, String chainedFrom) {
-        try {
-            return client.responses().create(params);
+    /**
+     * One round, streamed.
+     *
+     * <p>Uses {@code createStreaming} rather than {@code create}, but returns
+     * the same {@link Response} the blocking call would have — the terminal
+     * {@code response.completed} event carries the whole thing, tool calls and
+     * token usage included. So everything downstream of here is unchanged by
+     * streaming; the only difference is that text reached the user earlier.
+     *
+     * <p>Text deltas are relayed as they arrive. Anything else in the event
+     * stream (item added, item done, reasoning) is ignored: those describe the
+     * response being assembled, which the completed event then hands over in
+     * full.
+     */
+    private Response send(ResponseCreateParams params, String chainedFrom, BotStreamListener listener) {
+        try (StreamResponse<ResponseStreamEvent> stream = client.responses().createStreaming(params)) {
+            Response completed = null;
+            for (ResponseStreamEvent event : (Iterable<ResponseStreamEvent>) stream.stream()::iterator) {
+                if (event.isOutputTextDelta()) {
+                    listener.onTextDelta(event.outputTextDelta().get().delta());
+                } else if (event.isCompleted()) {
+                    completed = event.completed().get().response();
+                }
+            }
+            if (completed == null) {
+                // The stream ended without a completed event — a truncated
+                // connection, or an error event we do not model. There is no
+                // response to continue the loop from.
+                throw new BotBrainException("Response stream ended without completing");
+            }
+            return completed;
         } catch (OpenAIServiceException e) {
             if (chainedFrom != null && isUnknownPreviousResponse(e)) {
                 throw new ExpiredConversationException(
@@ -208,6 +243,22 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
         } catch (RuntimeException e) {
             throw new BotBrainException("OpenAI Responses API call failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Turns a tool name into something a patient can read.
+     *
+     * <p>Never the tool name itself: "get_available_slots" tells them the bot is
+     * a program, which the prompt is at pains not to do.
+     */
+    private static String statusFor(String toolName) {
+        return switch (toolName) {
+            case "list_specialties", "find_doctors" -> "Looking up our doctors…";
+            case "get_available_slots" -> "Checking availability…";
+            case "get_my_appointments" -> "Checking your appointments…";
+            case "book_appointment" -> "Booking that for you…";
+            default -> "One moment…";
+        };
     }
 
     /**

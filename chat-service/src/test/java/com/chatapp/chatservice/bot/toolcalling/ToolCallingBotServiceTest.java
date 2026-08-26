@@ -90,7 +90,7 @@ class ToolCallingBotServiceTest {
     void usersMessage_isPersistedUndeliveredJustAsVersionOneDoes() {
         brain.next = turn("Hello!", 1);
 
-        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         // The handler flips this once the reply is persisted — the double tick
         // means "the bot has answered" for both bots alike.
@@ -104,7 +104,7 @@ class ToolCallingBotServiceTest {
         // be built for THIS user — nothing the model does can widen it.
         brain.next = turn("Hello!", 1);
 
-        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         assertThat(brain.seenExecutor).isNotNull();
     }
@@ -113,7 +113,7 @@ class ToolCallingBotServiceTest {
     void firstTurn_sendsNoChainAndStoresTheNewResponseId() {
         brain.next = turn("Hello!", 1);
 
-        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
+        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         assertThat(brain.seenPreviousResponseId).isNull();
         assertThat(reply.content()).isEqualTo("Hello!");
@@ -127,13 +127,13 @@ class ToolCallingBotServiceTest {
     @Test
     void firstTurnGetsTheWelcomeInstruction_laterTurnsDoNot() {
         brain.next = turn("Hello!", 1);
-        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
         assertThat(brain.seenSystemPrompt).startsWith("THIS IS THE FIRST MESSAGE");
 
         when(conversationStateRepository.findByConversationKey(CONVERSATION_KEY))
                 .thenReturn(Optional.of(new BotConversationState(CONVERSATION_KEY, "resp_1", SENT_AT)));
         brain.next = turn("Sure.", 1);
-        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "and then?", SENT_AT);
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "and then?", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
         assertThat(brain.seenSystemPrompt).contains("already under way");
     }
 
@@ -141,7 +141,7 @@ class ToolCallingBotServiceTest {
     void thePromptCarriesNoClinicData_whichIsTheWholePoint() {
         brain.next = turn("Hello!", 1);
 
-        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         // Version 1's prompt lists every doctor, every working-hours row and
         // every booking. This one must not — if clinic data ever leaks back into
@@ -159,7 +159,7 @@ class ToolCallingBotServiceTest {
                 .thenReturn(Optional.of(new BotConversationState(CONVERSATION_KEY, "resp_1", SENT_AT)));
         brain.next = turn("Sure.", 1);
 
-        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "the 9am one", SENT_AT);
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "the 9am one", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         assertThat(brain.seenPreviousResponseId).isEqualTo("resp_1");
     }
@@ -173,7 +173,7 @@ class ToolCallingBotServiceTest {
                 new TokenUsage(4200, 180, 4380), "gpt-4o-mini",
                 List.of(new ToolInvocation("get_available_slots", "{}", "{\"available_slots\":[]}")), 3);
 
-        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "book it", SENT_AT);
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "book it", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         ArgumentCaptor<BotTokenUsage> usage = ArgumentCaptor.forClass(BotTokenUsage.class);
         verify(tokenUsageRepository).save(usage.capture());
@@ -190,7 +190,7 @@ class ToolCallingBotServiceTest {
                         new ToolInvocation("find_doctors", "{\"specialty\":\"Orthopedic\"}", "{\"doctors\":[]}")),
                 2);
 
-        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "who do you have?", SENT_AT);
+        service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "who do you have?", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         ArgumentCaptor<BotPromptLog> logRow = ArgumentCaptor.forClass(BotPromptLog.class);
         verify(promptLogRepository).save(logRow.capture());
@@ -210,7 +210,7 @@ class ToolCallingBotServiceTest {
         brain.failOnceWith = new ExpiredConversationException("gone", null);
         brain.next = turn("Hello again!", 1);
 
-        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
+        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         assertThat(reply.content()).isEqualTo("Hello again!");
         assertThat(brain.calls).isEqualTo(2);
@@ -225,7 +225,7 @@ class ToolCallingBotServiceTest {
     void aFailedTurn_apologisesAndLeavesTheChainIntact() {
         brain.failure = new BotBrainException("upstream 503");
 
-        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
+        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         assertThat(reply.content()).contains("something went wrong");
         verify(conversationStateRepository, never()).save(any());
@@ -236,7 +236,7 @@ class ToolCallingBotServiceTest {
     void unconfiguredBrain_apologisesWithoutCallingTheModel() {
         brain.configured = false;
 
-        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
+        BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
         assertThat(reply.content()).contains("isn't available");
         assertThat(brain.calls).isZero();
@@ -268,7 +268,7 @@ class ToolCallingBotServiceTest {
 
         @Override
         public ToolTurn respond(String systemPrompt, String userMessage, String previousResponseId,
-                                ClinicToolExecutor executor) {
+                                ClinicToolExecutor executor, BotStreamListener listener) {
             calls++;
             seenSystemPrompt = systemPrompt;
             seenPreviousResponseId = previousResponseId;
