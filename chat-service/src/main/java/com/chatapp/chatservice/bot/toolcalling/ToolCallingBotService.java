@@ -6,10 +6,13 @@ import com.chatapp.chatservice.bot.clinic.repository.AppointmentRepository;
 import com.chatapp.chatservice.bot.clinic.repository.DoctorAvailabilityRepository;
 import com.chatapp.chatservice.bot.clinic.repository.DoctorRepository;
 import com.chatapp.chatservice.bot.conversation.entity.BotConversationState;
+import com.chatapp.chatservice.bot.conversation.RoundRecord;
 import com.chatapp.chatservice.bot.conversation.entity.BotPromptLog;
+import com.chatapp.chatservice.bot.conversation.entity.BotRoundLog;
 import com.chatapp.chatservice.bot.conversation.entity.BotTokenUsage;
 import com.chatapp.chatservice.bot.conversation.repository.BotConversationStateRepository;
 import com.chatapp.chatservice.bot.conversation.repository.BotPromptLogRepository;
+import com.chatapp.chatservice.bot.conversation.repository.BotRoundLogRepository;
 import com.chatapp.chatservice.bot.conversation.repository.BotTokenUsageRepository;
 import com.chatapp.chatservice.bot.promptstuffing.BotBrainException;
 import com.chatapp.chatservice.bot.promptstuffing.ExpiredConversationException;
@@ -62,6 +65,7 @@ public class ToolCallingBotService {
     private final BotConversationStateRepository conversationStateRepository;
     private final BotTokenUsageRepository tokenUsageRepository;
     private final BotPromptLogRepository promptLogRepository;
+    private final BotRoundLogRepository roundLogRepository;
 
     private final DoctorRepository doctorRepository;
     private final DoctorAvailabilityRepository availabilityRepository;
@@ -71,6 +75,7 @@ public class ToolCallingBotService {
     private final ObjectMapper objectMapper;
 
     private final boolean logPrompts;
+    private final boolean logRounds;
     private final int horizonDays;
     private final Clock clock;
 
@@ -81,6 +86,7 @@ public class ToolCallingBotService {
             BotConversationStateRepository conversationStateRepository,
             BotTokenUsageRepository tokenUsageRepository,
             BotPromptLogRepository promptLogRepository,
+            BotRoundLogRepository roundLogRepository,
             DoctorRepository doctorRepository,
             DoctorAvailabilityRepository availabilityRepository,
             AppointmentRepository appointmentRepository,
@@ -88,6 +94,7 @@ public class ToolCallingBotService {
             BookingService bookingService,
             ObjectMapper objectMapper,
             @Value("${bot.log-prompts}") boolean logPrompts,
+            @Value("${bot.log-rounds}") boolean logRounds,
             @Value("${bot.booking-horizon-days}") int horizonDays,
             Clock clock) {
         this.brain = brain;
@@ -96,6 +103,7 @@ public class ToolCallingBotService {
         this.conversationStateRepository = conversationStateRepository;
         this.tokenUsageRepository = tokenUsageRepository;
         this.promptLogRepository = promptLogRepository;
+        this.roundLogRepository = roundLogRepository;
         this.doctorRepository = doctorRepository;
         this.availabilityRepository = availabilityRepository;
         this.appointmentRepository = appointmentRepository;
@@ -103,6 +111,7 @@ public class ToolCallingBotService {
         this.bookingService = bookingService;
         this.objectMapper = objectMapper;
         this.logPrompts = logPrompts;
+        this.logRounds = logRounds;
         this.horizonDays = horizonDays;
         this.clock = clock;
     }
@@ -153,7 +162,9 @@ public class ToolCallingBotService {
         String botMessageId = replyMessageId;
         recordResponseId(conversationKey, turn.responseId());
         int turnNumber = recordTokenUsage(conversationKey, botMessageId, turn);
-        recordPrompt(conversationKey, turnNumber, botMessageId, previousResponseId, turn, systemPrompt, content);
+        Long promptLogId = recordPrompt(
+                conversationKey, turnNumber, botMessageId, previousResponseId, turn, systemPrompt, content);
+        recordRounds(conversationKey, turnNumber, promptLogId, turn.roundLog());
 
         return new BotReply(botMessageId, turn.replyToUser());
     }
@@ -210,10 +221,10 @@ public class ToolCallingBotService {
         return turnNumber;
     }
 
-    private void recordPrompt(String conversationKey, int turnNumber, String botMessageId,
+    private Long recordPrompt(String conversationKey, int turnNumber, String botMessageId,
                               String previousResponseId, ToolTurn turn, String systemPrompt, String userMessage) {
         if (!logPrompts) {
-            return;
+            return null;
         }
         try {
             // The tool trace is this bot's equivalent of Version 1's giant
@@ -222,15 +233,57 @@ public class ToolCallingBotService {
             String trace = objectMapper.writeValueAsString(
                     ClinicToolExecutor.traceOf(turn.invocations()));
 
-            promptLogRepository.save(new BotPromptLog(
+            // The schemas are identical on every request, and stored anyway:
+            // they are ~2,600 characters that go up on EVERY round, so a
+            // five-round turn paid for them five times. Leaving them out made
+            // the logged prompt size disagree with the billed input tokens for
+            // no good reason.
+            String schema = objectMapper.writeValueAsString(ClinicTool.allAsFunctionTools());
+
+            BotPromptLog row = new BotPromptLog(
                     conversationKey, turnNumber, botMessageId,
                     previousResponseId, turn.responseId(),
                     systemPrompt, userMessage, turn.replyToUser(),
                     "TOOLS:" + turn.rounds(),
                     trace,
-                    clock.instant()));
+                    schema,
+                    clock.instant());
+            return promptLogRepository.save(row).getId();
         } catch (RuntimeException | com.fasterxml.jackson.core.JsonProcessingException e) {
             log.warn("Could not write prompt log for conversation {} turn {}: {}",
+                    conversationKey, turnNumber, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * The raw traffic behind the turn — one row per API call.
+     *
+     * <p>{@code bot_prompt_log} shows the prompt built ONCE at the start of the
+     * turn. That is not what was sent on rounds 2 and 3, and the difference (the
+     * instructions and tool schemas going up again, the growing chain) is the
+     * whole reason the loop costs what it does. These rows are where that is
+     * visible.
+     *
+     * <p>Best-effort: a failure here is logged and swallowed. The turn already
+     * happened and the patient already has their answer.
+     */
+    private void recordRounds(String conversationKey, int turnNumber,
+                              Long promptLogId, java.util.List<RoundRecord> rounds) {
+        if (!logRounds || rounds.isEmpty()) {
+            return;
+        }
+        try {
+            Instant now = clock.instant();
+            roundLogRepository.saveAll(rounds.stream()
+                    .map(r -> new BotRoundLog(
+                            promptLogId, conversationKey, turnNumber, r.roundNumber(),
+                            r.requestJson(), r.responseJson(),
+                            r.previousResponseId(), r.responseId(),
+                            r.inputTokens(), r.outputTokens(), now))
+                    .toList());
+        } catch (RuntimeException e) {
+            log.warn("Could not write round log for conversation {} turn {}: {}",
                     conversationKey, turnNumber, e.getMessage());
         }
     }

@@ -69,6 +69,9 @@ class ToolCallingBotServiceTest {
     @Mock private AvailabilityService availabilityService;
     @Mock private BookingService bookingService;
 
+    @Mock
+    private com.chatapp.chatservice.bot.conversation.repository.BotRoundLogRepository roundLogRepository;
+
     private FakeToolBrain brain;
     private ToolCallingBotService service;
 
@@ -79,8 +82,9 @@ class ToolCallingBotServiceTest {
         service = new ToolCallingBotService(
                 brain, new ToolBotPromptBuilder("Super Clinic", fixed), chatMessageService,
                 conversationStateRepository, tokenUsageRepository, promptLogRepository,
+                roundLogRepository,
                 doctorRepository, availabilityRepository, appointmentRepository,
-                availabilityService, bookingService, new ObjectMapper(), true, 7, fixed);
+                availabilityService, bookingService, new ObjectMapper(), true, true, 7, fixed);
 
         lenient().when(conversationStateRepository.findByConversationKey(anyString())).thenReturn(Optional.empty());
         lenient().when(tokenUsageRepository.countByConversationKey(anyString())).thenReturn(0L);
@@ -171,7 +175,7 @@ class ToolCallingBotServiceTest {
         when(tokenUsageRepository.countByConversationKey(CONVERSATION_KEY)).thenReturn(2L);
         brain.next = new ToolTurn("Booked.", "resp_3",
                 new TokenUsage(4200, 180, 4380), "gpt-4o-mini",
-                List.of(new ToolInvocation("get_available_slots", "{}", "{\"available_slots\":[]}")), 3);
+                List.of(new ToolInvocation("get_available_slots", "{}", "{\"available_slots\":[]}")), 3, List.of());
 
         service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "book it", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
@@ -188,7 +192,7 @@ class ToolCallingBotServiceTest {
                 new TokenUsage(100, 20, 120), "gpt-4o-mini",
                 List.of(new ToolInvocation("list_specialties", "{}", "{\"specialties\":[\"Orthopedic\"]}"),
                         new ToolInvocation("find_doctors", "{\"specialty\":\"Orthopedic\"}", "{\"doctors\":[]}")),
-                2);
+                2, List.of());
 
         service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "who do you have?", SENT_AT, "bot-msg-1", BotStreamListener.NOOP);
 
@@ -247,7 +251,7 @@ class ToolCallingBotServiceTest {
     }
 
     private ToolTurn turn(String reply, int rounds) {
-        return new ToolTurn(reply, "resp_1", new TokenUsage(100, 20, 120), "gpt-4o-mini", List.of(), rounds);
+        return new ToolTurn(reply, "resp_1", new TokenUsage(100, 20, 120), "gpt-4o-mini", List.of(), rounds, List.of());
     }
 
     /** See {@code DoctorAssistantBotServiceTest}'s fake for why this is not a mock. */

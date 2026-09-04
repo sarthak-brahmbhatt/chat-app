@@ -7,6 +7,8 @@ import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.errors.OpenAIServiceException;
 import com.openai.models.responses.Response;
+import com.chatapp.chatservice.bot.conversation.RoundRecord;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openai.models.responses.ResponseCreateParams;
 import com.openai.models.responses.ResponseFunctionToolCall;
 import com.openai.models.responses.ResponseInputItem;
@@ -61,6 +63,9 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
      */
     private static final int MAX_ROUNDS = 5;
 
+    /** Own mapper: this serialises SDK types, nothing to do with the app's own JSON. */
+    private static final ObjectMapper LOG_MAPPER = new ObjectMapper();
+
     private final OpenAIClient client;
     private final String model;
 
@@ -113,6 +118,9 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
         }
 
         List<ToolInvocation> invocations = new ArrayList<>();
+        // Filled by send(), one entry per API call, so the caller can persist the
+        // raw traffic. The loop's shape is invisible from bot_prompt_log alone.
+        List<RoundRecord> roundLog = new ArrayList<>();
         int inputTokens = 0;
         int outputTokens = 0;
         int totalTokens = 0;
@@ -128,7 +136,7 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
         }
         ClinicTool.allAsFunctionTools().forEach(first::addTool);
 
-        Response response = send(first.build(), previousResponseId, listener);
+        Response response = send(first.build(), previousResponseId, listener, roundLog);
         int rounds = 1;
 
         while (true) {
@@ -148,7 +156,7 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
                         rounds, invocations.size(), totalTokens);
                 return new ToolTurn(text, response.id(),
                         new TokenUsage(inputTokens, outputTokens, totalTokens),
-                        model, List.copyOf(invocations), rounds);
+                        model, List.copyOf(invocations), rounds, List.copyOf(roundLog));
             }
 
             if (rounds >= MAX_ROUNDS) {
@@ -198,7 +206,7 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
                     .store(true);
             ClinicTool.allAsFunctionTools().forEach(next::addTool);
 
-            response = send(next.build(), response.id(), listener);
+            response = send(next.build(), response.id(), listener, roundLog);
             rounds++;
         }
     }
@@ -217,7 +225,8 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
      * response being assembled, which the completed event then hands over in
      * full.
      */
-    private Response send(ResponseCreateParams params, String chainedFrom, BotStreamListener listener) {
+    private Response send(ResponseCreateParams params, String chainedFrom,
+                          BotStreamListener listener, List<RoundRecord> rounds) {
         try (StreamResponse<ResponseStreamEvent> stream = client.responses().createStreaming(params)) {
             Response completed = null;
             for (ResponseStreamEvent event : (Iterable<ResponseStreamEvent>) stream.stream()::iterator) {
@@ -226,6 +235,9 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
                 } else if (event.isCompleted()) {
                     completed = event.completed().get().response();
                 }
+            }
+            if (completed != null) {
+                recordRound(rounds, params, completed, chainedFrom);
             }
             if (completed == null) {
                 // The stream ended without a completed event — a truncated
@@ -242,6 +254,33 @@ public class OpenAiToolCallingBrain implements ToolCallingBrain {
             throw new BotBrainException("OpenAI Responses API call failed: " + e.getMessage(), e);
         } catch (RuntimeException e) {
             throw new BotBrainException("OpenAI Responses API call failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Captures one round's raw request and response.
+     *
+     * <p>The request comes from the SDK's own {@code _body()} rather than being
+     * reassembled from the fields we set — reassembling it would be a second
+     * description of the payload, free to drift from the one actually sent, and
+     * the whole point of this log is that it cannot.
+     *
+     * <p>Never throws. A log that can kill a turn is worse than no log.
+     */
+    private void recordRound(List<RoundRecord> rounds, ResponseCreateParams params,
+                             Response completed, String chainedFrom) {
+        try {
+            TokenUsage usage = usageOf(completed);
+            rounds.add(new RoundRecord(
+                    rounds.size() + 1,
+                    LOG_MAPPER.writeValueAsString(params._body()),
+                    LOG_MAPPER.writeValueAsString(completed),
+                    chainedFrom,
+                    completed.id(),
+                    usage.inputTokens(),
+                    usage.outputTokens()));
+        } catch (Exception e) {
+            log.debug("Could not capture round {} for the round log: {}", rounds.size() + 1, e.getMessage());
         }
     }
 

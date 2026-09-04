@@ -1,5 +1,7 @@
 package com.chatapp.chatservice.bot.promptstuffing;
 
+import com.chatapp.chatservice.bot.conversation.RoundRecord;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.errors.OpenAIServiceException;
@@ -14,6 +16,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.Locale;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -38,6 +41,9 @@ import java.util.Optional;
 public class OpenAiBotBrain implements BotBrain {
 
     private static final Logger log = LoggerFactory.getLogger(OpenAiBotBrain.class);
+
+    /** Own mapper: this serialises SDK types, nothing to do with the app's own JSON. */
+    private static final ObjectMapper LOG_MAPPER = new ObjectMapper();
 
     private final OpenAIClient client;
     private final String model;
@@ -125,7 +131,24 @@ public class OpenAiBotBrain implements BotBrain {
         log.debug("Bot turn: action={} tokens in/out/total={}/{}/{}",
                 decision.action(), usage.inputTokens(), usage.outputTokens(), usage.totalTokens());
 
-        return new BotTurn(decision, response.id(), usage, model);
+        // Version 1 makes exactly one call, so its round log is one row. Kept
+        // anyway: the comparison against Version 2's three or five rows is the
+        // clearest single statement of what the loop costs.
+        List<RoundRecord> roundLog = List.of();
+        try {
+            roundLog = List.of(new RoundRecord(
+                    1,
+                    LOG_MAPPER.writeValueAsString(params.rawParams()._body()),
+                    LOG_MAPPER.writeValueAsString(response.rawResponse()),
+                    previousResponseId,
+                    response.id(),
+                    usage.inputTokens(),
+                    usage.outputTokens()));
+        } catch (Exception e) {
+            log.debug("Could not capture the round log: {}", e.getMessage());
+        }
+
+        return new BotTurn(decision, response.id(), usage, model, roundLog);
     }
 
     /**

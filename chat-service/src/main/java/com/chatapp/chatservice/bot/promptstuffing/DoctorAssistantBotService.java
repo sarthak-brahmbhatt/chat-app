@@ -5,8 +5,11 @@ import com.chatapp.chatservice.bot.clinic.BookingRequest;
 import com.chatapp.chatservice.bot.clinic.BookingService;
 import com.chatapp.chatservice.bot.conversation.entity.BotConversationState;
 import com.chatapp.chatservice.bot.conversation.repository.BotConversationStateRepository;
+import com.chatapp.chatservice.bot.conversation.RoundRecord;
 import com.chatapp.chatservice.bot.conversation.entity.BotPromptLog;
+import com.chatapp.chatservice.bot.conversation.entity.BotRoundLog;
 import com.chatapp.chatservice.bot.conversation.repository.BotPromptLogRepository;
+import com.chatapp.chatservice.bot.conversation.repository.BotRoundLogRepository;
 import com.chatapp.chatservice.bot.conversation.repository.BotTokenUsageRepository;
 import com.chatapp.chatservice.bot.conversation.entity.BotTokenUsage;
 import com.chatapp.chatservice.bot.routing.BotReply;
@@ -59,7 +62,9 @@ public class DoctorAssistantBotService {
     private final BotConversationStateRepository conversationStateRepository;
     private final BotTokenUsageRepository tokenUsageRepository;
     private final BotPromptLogRepository promptLogRepository;
+    private final BotRoundLogRepository roundLogRepository;
     private final boolean logPrompts;
+    private final boolean logRounds;
     private final Clock clock;
 
     public DoctorAssistantBotService(
@@ -71,7 +76,9 @@ public class DoctorAssistantBotService {
             BotConversationStateRepository conversationStateRepository,
             BotTokenUsageRepository tokenUsageRepository,
             BotPromptLogRepository promptLogRepository,
+            BotRoundLogRepository roundLogRepository,
             @Value("${bot.log-prompts}") boolean logPrompts,
+            @Value("${bot.log-rounds}") boolean logRounds,
             Clock clock) {
         this.botBrain = botBrain;
         this.clinicDataProvider = clinicDataProvider;
@@ -81,7 +88,9 @@ public class DoctorAssistantBotService {
         this.conversationStateRepository = conversationStateRepository;
         this.tokenUsageRepository = tokenUsageRepository;
         this.promptLogRepository = promptLogRepository;
+        this.roundLogRepository = roundLogRepository;
         this.logPrompts = logPrompts;
+        this.logRounds = logRounds;
         this.clock = clock;
     }
 
@@ -168,8 +177,9 @@ public class DoctorAssistantBotService {
         String botMessageId = UUID.randomUUID().toString();
         recordResponseId(conversationKey, turn.responseId());
         int turnNumber = recordTokenUsage(conversationKey, botMessageId, turn);
-        recordPrompt(conversationKey, turnNumber, botMessageId, previousResponseId,
+        Long promptLogId = recordPrompt(conversationKey, turnNumber, botMessageId, previousResponseId,
                 turn, systemPrompt, content, replyText);
+        recordRounds(conversationKey, turnNumber, promptLogId, turn.roundLog());
 
         return new BotReply(botMessageId, replyText);
     }
@@ -270,14 +280,14 @@ public class DoctorAssistantBotService {
      * succeeded and the answer is already on its way, so a logging problem is
      * logged and swallowed rather than turned into an apology.
      */
-    private void recordPrompt(
+    private Long recordPrompt(
             String conversationKey, int turnNumber, String botMessageId, String previousResponseId,
             BotTurn turn, String systemPrompt, String userMessage, String replyText) {
         if (!logPrompts) {
-            return;
+            return null;
         }
         try {
-            promptLogRepository.save(new BotPromptLog(
+            return promptLogRepository.save(new BotPromptLog(
                     conversationKey,
                     turnNumber,
                     botMessageId,
@@ -287,12 +297,40 @@ public class DoctorAssistantBotService {
                     userMessage,
                     replyText,
                     turn.decision().action().name(),
-                    // No tool calls — that column belongs to the other bot, and
-                    // its emptiness here is part of the comparison.
+                    // No tool calls, and no tool schema — both columns belong to
+                    // the other bot, and their emptiness here is part of the
+                    // comparison. Everything this bot sends is in systemPrompt.
                     null,
-                    clock.instant()));
+                    null,
+                    clock.instant())).getId();
         } catch (RuntimeException e) {
             log.warn("Could not write prompt log for conversation {} turn {}: {}",
+                    conversationKey, turnNumber, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * The raw traffic behind the turn. Version 1 makes one call, so this is one
+     * row — and that is the point of keeping it: set beside Version 2's three or
+     * five rows for the same question, the difference stops needing explanation.
+     */
+    private void recordRounds(String conversationKey, int turnNumber,
+                              Long promptLogId, java.util.List<RoundRecord> rounds) {
+        if (!logRounds || rounds.isEmpty()) {
+            return;
+        }
+        try {
+            Instant now = clock.instant();
+            roundLogRepository.saveAll(rounds.stream()
+                    .map(r -> new BotRoundLog(
+                            promptLogId, conversationKey, turnNumber, r.roundNumber(),
+                            r.requestJson(), r.responseJson(),
+                            r.previousResponseId(), r.responseId(),
+                            r.inputTokens(), r.outputTokens(), now))
+                    .toList());
+        } catch (RuntimeException e) {
+            log.warn("Could not write round log for conversation {} turn {}: {}",
                     conversationKey, turnNumber, e.getMessage());
         }
     }

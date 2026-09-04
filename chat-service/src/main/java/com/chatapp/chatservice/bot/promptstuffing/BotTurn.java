@@ -13,5 +13,6 @@ package com.chatapp.chatservice.bot.promptstuffing;
  * @param model      the model that actually served the call, recorded per row so
  *                   a config change does not silently pool two models' numbers
  */
-public record BotTurn(BotDecision decision, String responseId, TokenUsage usage, String model) {
+public record BotTurn(BotDecision decision, String responseId, TokenUsage usage, String model,
+                      java.util.List<com.chatapp.chatservice.bot.conversation.RoundRecord> roundLog) {
 }

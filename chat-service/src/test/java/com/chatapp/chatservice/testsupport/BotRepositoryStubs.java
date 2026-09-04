@@ -3,6 +3,7 @@ package com.chatapp.chatservice.testsupport;
 import com.chatapp.chatservice.bot.clinic.repository.AppointmentRepository;
 import com.chatapp.chatservice.bot.conversation.repository.BotConversationStateRepository;
 import com.chatapp.chatservice.bot.conversation.repository.BotPromptLogRepository;
+import com.chatapp.chatservice.bot.conversation.repository.BotRoundLogRepository;
 import com.chatapp.chatservice.bot.conversation.repository.BotTokenUsageRepository;
 import com.chatapp.chatservice.bot.clinic.repository.DoctorAvailabilityRepository;
 import com.chatapp.chatservice.bot.clinic.repository.DoctorRepository;
@@ -33,6 +34,11 @@ public class BotRepositoryStubs {
     @Bean
     public AppUserRepository appUserRepository() {
         return Mockito.mock(AppUserRepository.class);
+    }
+
+    @Bean
+    public BotRoundLogRepository botRoundLogRepository() {
+        return Mockito.mock(BotRoundLogRepository.class);
     }
 
     @Bean

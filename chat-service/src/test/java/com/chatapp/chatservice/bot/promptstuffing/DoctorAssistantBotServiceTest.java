@@ -77,6 +77,9 @@ class DoctorAssistantBotServiceTest {
     @Mock
     private BotPromptLogRepository promptLogRepository;
 
+    @Mock
+    private com.chatapp.chatservice.bot.conversation.repository.BotRoundLogRepository roundLogRepository;
+
     private FakeBotBrain brain;
     private DoctorAssistantBotService service;
 
@@ -86,7 +89,8 @@ class DoctorAssistantBotServiceTest {
         Clock fixed = Clock.fixed(SENT_AT, ZoneOffset.UTC);
         service = new DoctorAssistantBotService(
                 brain, clinicDataProvider, promptBuilder, bookingService, chatMessageService,
-                conversationStateRepository, tokenUsageRepository, promptLogRepository, true, fixed);
+                conversationStateRepository, tokenUsageRepository, promptLogRepository,
+                roundLogRepository, true, true, fixed);
 
         lenient().when(clinicDataProvider.snapshot(anyLong())).thenReturn(snapshotWithDoctors());
         lenient().when(promptBuilder.systemPrompt(any(), anyBoolean())).thenReturn("SYSTEM PROMPT");
@@ -189,7 +193,7 @@ class DoctorAssistantBotServiceTest {
     void tokenUsage_isRecordedWithAnIncrementingTurnNumber() {
         when(tokenUsageRepository.countByConversationKey(CONVERSATION_KEY)).thenReturn(3L);
         brain.next = new BotTurn(decision("Hi", BotAction.NONE), "resp_4",
-                new TokenUsage(1500, 40, 1540), "gpt-4o-mini");
+                new TokenUsage(1500, 40, 1540), "gpt-4o-mini", List.of());
 
         BotReply reply = service.handleUserMessage(USER_ID, BOT_ID, USER_MESSAGE_ID, "hi", SENT_AT);
 
@@ -304,7 +308,7 @@ class DoctorAssistantBotServiceTest {
     }
 
     private BotTurn turn(BotDecision decision, String responseId) {
-        return new BotTurn(decision, responseId, new TokenUsage(100, 20, 120), "gpt-4o-mini");
+        return new BotTurn(decision, responseId, new TokenUsage(100, 20, 120), "gpt-4o-mini", List.of());
     }
 
     /**

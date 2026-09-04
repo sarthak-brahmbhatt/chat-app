@@ -104,6 +104,21 @@ public class BotPromptLog {
     @Column(name = "tool_calls", columnDefinition = "TEXT")
     private String toolCalls;
 
+    /**
+     * For the tool-calling bot: the EXACT tool schemas sent with every round of
+     * this turn. Null for the prompt-stuffing bot, which sends none.
+     *
+     * <p>Logged even though it is byte-identical on every request, because it is
+     * not free: ~2,600 characters go up on each round, and a turn that made five
+     * rounds paid for it five times. Without this the row shows a 3,500-character
+     * prompt against an input-token count that only makes sense once you know
+     * the schemas are in there too — the same reason Version 1's whole prompt is
+     * stored rather than described.
+     */
+    @Lob
+    @Column(name = "tool_schema", columnDefinition = "LONGTEXT")
+    private String toolSchema;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -121,6 +136,7 @@ public class BotPromptLog {
             String replyToUser,
             String action,
             String toolCalls,
+            String toolSchema,
             Instant createdAt) {
         this.conversationKey = conversationKey;
         this.turnNumber = turnNumber;
@@ -132,6 +148,7 @@ public class BotPromptLog {
         this.replyToUser = replyToUser;
         this.action = action;
         this.toolCalls = toolCalls;
+        this.toolSchema = toolSchema;
         this.createdAt = createdAt;
     }
 
@@ -177,6 +194,10 @@ public class BotPromptLog {
 
     public String getToolCalls() {
         return toolCalls;
+    }
+
+    public String getToolSchema() {
+        return toolSchema;
     }
 
     public Instant getCreatedAt() {

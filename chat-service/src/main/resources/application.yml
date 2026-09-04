@@ -129,6 +129,16 @@ bot:
   # several KB per turn. Fine locally; a retention policy, redaction, or this
   # switch set to false is what a real deployment would need.
   log-prompts: ${BOT_LOG_PROMPTS:true}
+  # Writes one row per API CALL to `bot_round_log` — the exact request body and
+  # the exact response, per round. `log-prompts` above records one row per TURN,
+  # holding the prompt built once at the start; that is not what rounds 2 and 3
+  # of a tool-calling turn actually sent. Reading these rows in order is reading
+  # the conversation with the model, and it is the only place the re-sent
+  # instructions and tool schemas can be seen.
+  #
+  # Separate switch because it is the bulkier of the two — roughly 6KB per round
+  # against one prompt per turn — so it can be turned off on its own.
+  log-rounds: ${BOT_LOG_ROUNDS:true}
 
 server:
   port: 8080

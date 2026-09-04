@@ -1,5 +1,6 @@
 package com.chatapp.chatservice.bot.toolcalling;
 
+import com.chatapp.chatservice.bot.conversation.RoundRecord;
 import com.chatapp.chatservice.bot.promptstuffing.TokenUsage;
 
 import java.util.List;
@@ -24,6 +25,10 @@ import java.util.List;
  * @param rounds       how many API calls the loop took. A turn needing many is
  *                     worth noticing: it is the cost Version 2 pays in latency
  *                     for the accuracy it buys.
+ * @param roundLog     the raw request and response for each of those calls, in
+ *                     order. {@code rounds} is the count; this is the content —
+ *                     the only place the re-sent instructions and tool schemas
+ *                     of round 2 onward can actually be seen.
  */
 public record ToolTurn(
         String replyToUser,
@@ -31,5 +36,6 @@ public record ToolTurn(
         TokenUsage usage,
         String model,
         List<ToolInvocation> invocations,
-        int rounds) {
+        int rounds,
+        List<RoundRecord> roundLog) {
 }
