@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Refresh token rotation and reuse detection</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { display: flex; justify-content: center; padding: 24px; }
+  svg { width: 100%; max-width: 1100px; height: auto; }
+  text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #111827; }
+</style>
+</head>
+<body>
+<svg viewBox="0 0 960 800" xmlns="http://www.w3.org/2000/svg" role="img"
+     aria-label="Scenario A: a normal refresh rotates RT1 into RT2. Scenario B: replaying the already-used RT1 is detected and revokes the whole token family.">
+  <defs>
+    <marker id="gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/>
+    </marker>
+    <marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#15803d"/>
+    </marker>
+    <marker id="red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b91c1c"/>
+    </marker>
+  </defs>
+
+  <!-- ============ Scenario A ============ -->
+  <text x="45" y="46" font-size="20" font-weight="700" fill="#15803d">Scenario A — Normal refresh</text>
+
+  <rect x="60"  y="66" width="200" height="46" rx="6" fill="none" stroke="#4b5563" stroke-width="2"/>
+  <text x="160" y="95" text-anchor="middle" font-size="17" font-weight="600">Client</text>
+
+  <rect x="380" y="66" width="200" height="46" rx="6" fill="none" stroke="#4b5563" stroke-width="2"/>
+  <text x="480" y="95" text-anchor="middle" font-size="17" font-weight="600">Auth service</text>
+
+  <rect x="700" y="66" width="200" height="46" rx="6" fill="none" stroke="#4b5563" stroke-width="2"/>
+  <text x="800" y="95" text-anchor="middle" font-size="17" font-weight="600">Redis</text>
+
+  <line x1="160" y1="112" x2="160" y2="340" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <line x1="480" y1="112" x2="480" y2="340" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <line x1="800" y1="112" x2="800" y2="340" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 5"/>
+
+  <line x1="160" y1="155" x2="474" y2="155" stroke="#15803d" stroke-width="2.5" marker-end="url(#green)"/>
+  <text x="172" y="146" font-size="16" fill="#111827">1. Send refresh token RT1</text>
+
+  <line x1="480" y1="205" x2="794" y2="205" stroke="#15803d" stroke-width="2.5" marker-end="url(#green)"/>
+  <text x="492" y="196" font-size="16" fill="#111827">2. Look up RT1 → valid</text>
+
+  <line x1="480" y1="255" x2="794" y2="255" stroke="#15803d" stroke-width="2.5" marker-end="url(#green)"/>
+  <text x="492" y="246" font-size="16" fill="#111827">3. Mark RT1 used, store RT2</text>
+
+  <line x1="474" y1="305" x2="166" y2="305" stroke="#15803d" stroke-width="2.5" marker-end="url(#green)"/>
+  <text x="196" y="296" font-size="16" fill="#111827">4. New access token + RT2</text>
+
+  <text x="60" y="372" font-size="17" font-style="italic" fill="#15803d">Token rotates on every use.</text>
+
+  <!-- ============ Scenario B ============ -->
+  <text x="45" y="452" font-size="20" font-weight="700" fill="#b91c1c">Scenario B — Stolen token reused</text>
+
+  <rect x="60"  y="472" width="200" height="46" rx="6" fill="none" stroke="#4b5563" stroke-width="2"/>
+  <text x="160" y="501" text-anchor="middle" font-size="17" font-weight="600">Attacker</text>
+
+  <rect x="380" y="472" width="200" height="46" rx="6" fill="none" stroke="#4b5563" stroke-width="2"/>
+  <text x="480" y="501" text-anchor="middle" font-size="17" font-weight="600">Auth service</text>
+
+  <rect x="700" y="472" width="200" height="46" rx="6" fill="none" stroke="#4b5563" stroke-width="2"/>
+  <text x="800" y="501" text-anchor="middle" font-size="17" font-weight="600">Redis</text>
+
+  <line x1="160" y1="518" x2="160" y2="700" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <line x1="480" y1="518" x2="480" y2="700" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 5"/>
+  <line x1="800" y1="518" x2="800" y2="700" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="5 5"/>
+
+  <line x1="160" y1="561" x2="474" y2="561" stroke="#4b5563" stroke-width="2.5" marker-end="url(#gray)"/>
+  <text x="172" y="552" font-size="16" fill="#111827">1. Send RT1 (already used)</text>
+
+  <line x1="480" y1="616" x2="794" y2="616" stroke="#b91c1c" stroke-width="3" marker-end="url(#red)"/>
+  <text x="492" y="607" font-size="16" font-weight="600" fill="#b91c1c">2. Look up RT1 → already used, reuse detected</text>
+
+  <line x1="480" y1="666" x2="794" y2="666" stroke="#4b5563" stroke-width="2.5" marker-end="url(#gray)"/>
+  <text x="492" y="657" font-size="16" fill="#111827">3. Revoke whole family (RT1, RT2, …), kill session</text>
+
+  <text x="60" y="732" font-size="17" font-style="italic" fill="#b91c1c">Reuse of an old token = theft signal. Everything is revoked.</text>
+
+  <!-- Trade-off -->
+  <text x="480" y="782" text-anchor="middle" font-size="16" fill="#4b5563">Cost: server-side state (Redis lookup) on every refresh. Acceptable: refreshes are rare, so the check is cheap.</text>
+</svg>
+</body>
+</html>

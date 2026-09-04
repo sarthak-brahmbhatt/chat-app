@@ -1,0 +1,1169 @@
+{
+  "info": {
+    "_postman_id": "b0c1d2e3-4f56-4789-8abc-de0123456789",
+    "name": "OpenAI Playground \u2014 Chat Completions vs Responses API",
+    "description": "# OpenAI API playground\n\nBuilt to mirror the two APIs behind this repo's DoctorAssistant bots (CLAUDE.md 3.9 and 3.10) so you can poke at them by hand.\n\n## Setup (one minute)\n\n1. Open the collection's **Variables** tab.\n2. Replace `api_key`'s CURRENT VALUE with your real key (`sk-...`). Leave the initial value as the placeholder so you never commit a key.\n3. Send **3.1 List models**. A 200 means you are ready.\n\n## Suggested order\n\n`3.1` \u2192 `1.1` \u2192 `1.2` (turn knobs) \u2192 `1.6`+`1.7` (tool loop, manual history) \u2192 `2.1` \u2192 `2.2`+`2.3` (chaining) \u2192 `2.5`+`2.6` (tool loop, chained) \u2192 `2.4` (structured output) \u2192 `2.7` (streaming) \u2192 `2.10` (read the chain back).\n\nRequests 2.3, 2.6, 2.9-2.11 and 1.7 depend on variables captured by an earlier request's test script \u2014 run the request they name first. Open Postman's **Console** (\u2325\u2318C) to see the captured ids, the reply text and the token counts logged for every call.\n\n## The one-line difference\n\nChat Completions is stateless \u2014 you resend the whole conversation, so input tokens grow every turn. Responses is chained \u2014 you send a pointer, and they do not.\n\nFull parameter reference: `docs/openai-postman-guide.md` in this repo.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{api_key}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "1 \u00b7 Chat Completions API  (/v1/chat/completions)",
+      "description": "The older, message-array API. You resend the WHOLE conversation every call \u2014 there is no server-side chaining here. Everything is under `messages`.\n\nRead `docs/openai-postman-guide.md` in this repo for the full parameter guide.",
+      "item": [
+        {
+          "name": "1.1 Minimal call",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "The smallest legal request: a model and one user message.\n\n**Things to try**\n- Change `model` to a bigger/smaller one and watch `usage` + latency.\n- Add a second object to `messages` with `\"role\": \"assistant\"` to fake prior context.\n\n**Where the answer is:** `choices[0].message.content`.\n**Where the cost is:** `usage.prompt_tokens` / `usage.completion_tokens`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"In one sentence, what is a WebSocket?\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const msg = j.choices && j.choices[0] && j.choices[0].message;",
+                  "if (msg && msg.tool_calls && msg.tool_calls.length) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", msg.tool_calls[0].id);",
+                  "    pm.collectionVariables.set(\"tool_call_name\", msg.tool_calls[0].function.name);",
+                  "    pm.collectionVariables.set(\"tool_call_args\", msg.tool_calls[0].function.arguments);",
+                  "    console.log(\"tool call ->\", msg.tool_calls[0].function.name, msg.tool_calls[0].function.arguments);",
+                  "}",
+                  "if (msg && msg.content) console.log(\"reply ->\", msg.content);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));",
+                  "console.log(\"finish_reason ->\", j.choices && j.choices[0] && j.choices[0].finish_reason);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.2 Parameter playground (every knob)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Every commonly-used sampling parameter set explicitly so you can turn them one at a time.\n\n| Param | Range | What it does |\n|---|---|---|\n| `temperature` | 0\u20132 | Randomness. 0 \u2248 deterministic. Above ~1.2 gets incoherent. |\n| `top_p` | 0\u20131 | Nucleus sampling: only consider tokens in the top P probability mass. **Change this OR temperature, not both.** |\n| `max_completion_tokens` | int | Hard cap on the reply. Hitting it gives `finish_reason: \"length\"` \u2014 a truncated, not shorter, answer. |\n| `n` | int | Generate N independent replies. Bills for all N. |\n| `stop` | array | Up to 4 strings; generation halts before them (they are not returned). |\n| `presence_penalty` | -2\u20132 | Positive = push toward NEW topics. |\n| `frequency_penalty` | -2\u20132 | Positive = punish repeating the same token. |\n| `seed` | int | Best-effort reproducibility with fixed temperature. Compare `system_fingerprint` across runs. |\n| `user` | string | Your own end-user id, for abuse tracing. |\n\n**Experiment:** set `temperature: 0` and send twice \u2014 near-identical. Set `2` and send twice \u2014 wildly different.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a terse assistant. Answer in at most two sentences.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Give me a name for a chat app's message-ack protocol.\"\n    }\n  ],\n  \"temperature\": 1.0,\n  \"top_p\": 1.0,\n  \"max_completion_tokens\": 200,\n  \"n\": 1,\n  \"stop\": [\n    \"\\n\\n\"\n  ],\n  \"presence_penalty\": 0,\n  \"frequency_penalty\": 0,\n  \"seed\": 42,\n  \"user\": \"sarthak-postman-playground\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const msg = j.choices && j.choices[0] && j.choices[0].message;",
+                  "if (msg && msg.tool_calls && msg.tool_calls.length) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", msg.tool_calls[0].id);",
+                  "    pm.collectionVariables.set(\"tool_call_name\", msg.tool_calls[0].function.name);",
+                  "    pm.collectionVariables.set(\"tool_call_args\", msg.tool_calls[0].function.arguments);",
+                  "    console.log(\"tool call ->\", msg.tool_calls[0].function.name, msg.tool_calls[0].function.arguments);",
+                  "}",
+                  "if (msg && msg.content) console.log(\"reply ->\", msg.content);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));",
+                  "console.log(\"finish_reason ->\", j.choices && j.choices[0] && j.choices[0].finish_reason);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.3 Multi-turn conversation (manual history)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Chat Completions is **stateless**. Memory exists only because you resend it.\n\nNote the shape: `system` \u2192 `user` \u2192 `assistant` \u2192 `user`. Every turn you append two more objects and resend the lot, so input tokens grow linearly with conversation length.\n\nThis is exactly the cost curve the Responses API's `previous_response_id` avoids \u2014 compare with request 2.3.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are DoctorAssistant for Super Clinic. Plain text, no markdown.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Hi, I need to see a cardiologist.\"\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\": \"Of course. Dr. Rao works Mondays and Thursdays. What day suits you?\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Thursday please, morning if you have it.\"\n    }\n  ],\n  \"temperature\": 0.3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const msg = j.choices && j.choices[0] && j.choices[0].message;",
+                  "if (msg && msg.tool_calls && msg.tool_calls.length) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", msg.tool_calls[0].id);",
+                  "    pm.collectionVariables.set(\"tool_call_name\", msg.tool_calls[0].function.name);",
+                  "    pm.collectionVariables.set(\"tool_call_args\", msg.tool_calls[0].function.arguments);",
+                  "    console.log(\"tool call ->\", msg.tool_calls[0].function.name, msg.tool_calls[0].function.arguments);",
+                  "}",
+                  "if (msg && msg.content) console.log(\"reply ->\", msg.content);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));",
+                  "console.log(\"finish_reason ->\", j.choices && j.choices[0] && j.choices[0].finish_reason);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.4 Streaming (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "`stream: true` turns the response into Server-Sent Events. Postman shows the raw `data: {...}` lines; each chunk carries `choices[0].delta.content` (a fragment, not the whole reply).\n\n`stream_options.include_usage: true` appends a FINAL chunk carrying `usage` \u2014 without it, streaming gives you no token counts at all. That matters if you are logging cost (your `bot_token_usage` table does).\n\nThe stream ends with a literal `data: [DONE]` line, which is not JSON \u2014 parsers must skip it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Explain Kafka partition ordering in about 120 words.\"\n    }\n  ],\n  \"stream\": true,\n  \"stream_options\": {\n    \"include_usage\": true\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "1.5 Structured output (json_schema)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Forces the reply to satisfy a JSON schema. This is the same `BotDecision` shape your Version 1 bot uses (`bot/promptstuffing/BotDecision.java`).\n\n**Strict-mode rules \u2014 all three or it 400s:**\n1. `additionalProperties: false` on every object.\n2. EVERY property listed in `required` \u2014 optionality is expressed as `\"type\": [\"string\", \"null\"]`, not by omitting the key.\n3. `strict: true`.\n\nThe result still arrives as a **string** in `choices[0].message.content` \u2014 you parse it yourself.\n\n**Try breaking it:** delete `additionalProperties` and resend to see the exact 400.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are DoctorAssistant, the appointment assistant for Super Clinic. Today is 2026-09-02 (Wednesday). Greet the patient by name on your first reply. Never guess availability \\u2014 always call get_available_slots. Never claim a specialty exists without calling list_specialties. Plain text only, no markdown.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Book me the 11:00 slot on 2026-09-07, availability id 12.\"\n    }\n  ],\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"bot_decision\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"reply_to_user\": {\n            \"type\": \"string\",\n            \"description\": \"The text the patient sees.\"\n          },\n          \"action\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"BOOK\",\n              \"NONE\"\n            ]\n          },\n          \"availability_id\": {\n            \"type\": [\n              \"integer\",\n              \"null\"\n            ]\n          },\n          \"booked_for_date\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ],\n            \"description\": \"YYYY-MM-DD\"\n          }\n        },\n        \"required\": [\n          \"reply_to_user\",\n          \"action\",\n          \"availability_id\",\n          \"booked_for_date\"\n        ],\n        \"additionalProperties\": false\n      }\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const msg = j.choices && j.choices[0] && j.choices[0].message;",
+                  "if (msg && msg.tool_calls && msg.tool_calls.length) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", msg.tool_calls[0].id);",
+                  "    pm.collectionVariables.set(\"tool_call_name\", msg.tool_calls[0].function.name);",
+                  "    pm.collectionVariables.set(\"tool_call_args\", msg.tool_calls[0].function.arguments);",
+                  "    console.log(\"tool call ->\", msg.tool_calls[0].function.name, msg.tool_calls[0].function.arguments);",
+                  "}",
+                  "if (msg && msg.content) console.log(\"reply ->\", msg.content);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));",
+                  "console.log(\"finish_reason ->\", j.choices && j.choices[0] && j.choices[0].finish_reason);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.6 Tool calling \u2014 round 1 (model asks)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Your five real clinic tools, in Chat Completions' **nested** format (`{type, function: {name, description, parameters}}`) \u2014 note the Responses API flattens this.\n\n**What comes back:** `finish_reason: \"tool_calls\"` and `choices[0].message.tool_calls[]`, each with an `id` and `function.arguments` (a JSON **string**).\nThe model has NOT answered yet \u2014 it asked a question.\n\n`tool_choice` options: `\"auto\"` (default), `\"none\"`, `\"required\"` (must call something), or `{\"type\":\"function\",\"function\":{\"name\":\"get_available_slots\"}}` to force one.\n`parallel_tool_calls: false` forces one call at a time \u2014 easier to follow while learning.\n\nThe test script saves `tool_call_id` for request 1.7.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are DoctorAssistant, the appointment assistant for Super Clinic. Today is 2026-09-02 (Wednesday). Greet the patient by name on your first reply. Never guess availability \\u2014 always call get_available_slots. Never claim a specialty exists without calling list_specialties. Plain text only, no markdown.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"What have you got free on the 7th of September?\"\n    }\n  ],\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"list_specialties\",\n        \"description\": \"List every medical specialty this clinic offers. Call this before telling a patient the clinic does or does not have a given specialty. The list is exhaustive.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {},\n          \"required\": [],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"find_doctors\",\n        \"description\": \"List the clinic's doctors and the weekdays each one works. Optionally filter to a single specialty. Use this to offer a patient their choice of doctor.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"specialty\": {\n              \"type\": [\n                \"string\",\n                \"null\"\n              ],\n              \"description\": \"Exact specialty to filter by. Null returns every doctor.\"\n            }\n          },\n          \"required\": [\n            \"specialty\"\n          ],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_available_slots\",\n        \"description\": \"Find appointment slots that are genuinely free on a specific date. Returns only bookable slots \\u2014 anything already taken, blocked, or belonging to a doctor who is not working is already excluded. Never guess availability; call this.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"date\": {\n              \"type\": \"string\",\n              \"description\": \"The date to check, as YYYY-MM-DD.\"\n            },\n            \"specialty\": {\n              \"type\": [\n                \"string\",\n                \"null\"\n              ],\n              \"description\": \"Only slots for doctors in this specialty. Null for all.\"\n            },\n            \"doctor_id\": {\n              \"type\": [\n                \"integer\",\n                \"null\"\n              ],\n              \"description\": \"Only slots for this doctor. Null for all.\"\n            }\n          },\n          \"required\": [\n            \"date\",\n            \"specialty\",\n            \"doctor_id\"\n          ],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_my_appointments\",\n        \"description\": \"List the appointments belonging to the patient you are currently talking to. This is the ONLY way to learn about a patient's bookings, and it returns only theirs.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {},\n          \"required\": [],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"book_appointment\",\n        \"description\": \"Book one specific slot for the patient you are talking to. Only call this after the patient has explicitly confirmed a slot you offered them.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"availability_id\": {\n              \"type\": \"integer\",\n              \"description\": \"The availability_id of the slot, exactly as returned by get_available_slots.\"\n            },\n            \"booked_for_date\": {\n              \"type\": \"string\",\n              \"description\": \"The date to book, as YYYY-MM-DD.\"\n            }\n          },\n          \"required\": [\n            \"availability_id\",\n            \"booked_for_date\"\n          ],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    }\n  ],\n  \"tool_choice\": \"auto\",\n  \"parallel_tool_calls\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const msg = j.choices && j.choices[0] && j.choices[0].message;",
+                  "if (msg && msg.tool_calls && msg.tool_calls.length) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", msg.tool_calls[0].id);",
+                  "    pm.collectionVariables.set(\"tool_call_name\", msg.tool_calls[0].function.name);",
+                  "    pm.collectionVariables.set(\"tool_call_args\", msg.tool_calls[0].function.arguments);",
+                  "    console.log(\"tool call ->\", msg.tool_calls[0].function.name, msg.tool_calls[0].function.arguments);",
+                  "}",
+                  "if (msg && msg.content) console.log(\"reply ->\", msg.content);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));",
+                  "console.log(\"finish_reason ->\", j.choices && j.choices[0] && j.choices[0].finish_reason);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.7 Tool calling \u2014 round 2 (you answer)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Run 1.6 first \u2014 `{{tool_call_id}}` is filled in automatically by its test script.\n\nYou must resend the whole history **including the assistant's own `tool_calls` message**, then append a `role: \"tool\"` message whose `tool_call_id` matches. Omit the assistant message and the API 400s: a tool result with nothing to answer.\n\n`content` on the tool message is always a **string** \u2014 stringify your JSON.\n\nThis round the model has data, so it replies in words. That two-step loop is what `OpenAiToolCallingBrain` runs up to `MAX_ROUNDS = 5` times.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are DoctorAssistant, the appointment assistant for Super Clinic. Today is 2026-09-02 (Wednesday). Greet the patient by name on your first reply. Never guess availability \\u2014 always call get_available_slots. Never claim a specialty exists without calling list_specialties. Plain text only, no markdown.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"What have you got free on the 7th of September?\"\n    },\n    {\n      \"role\": \"assistant\",\n      \"content\": null,\n      \"tool_calls\": [\n        {\n          \"id\": \"{{tool_call_id}}\",\n          \"type\": \"function\",\n          \"function\": {\n            \"name\": \"get_available_slots\",\n            \"arguments\": \"{\\\"date\\\":\\\"2026-09-07\\\",\\\"specialty\\\":null,\\\"doctor_id\\\":null}\"\n          }\n        }\n      ]\n    },\n    {\n      \"role\": \"tool\",\n      \"tool_call_id\": \"{{tool_call_id}}\",\n      \"content\": \"[{\\\"availability_id\\\":12,\\\"doctor\\\":\\\"Dr. Rao\\\",\\\"specialty\\\":\\\"Cardiology\\\",\\\"start\\\":\\\"11:00\\\",\\\"end\\\":\\\"11:30\\\"},{\\\"availability_id\\\":13,\\\"doctor\\\":\\\"Dr. Rao\\\",\\\"specialty\\\":\\\"Cardiology\\\",\\\"start\\\":\\\"11:30\\\",\\\"end\\\":\\\"12:00\\\"}]\"\n    }\n  ],\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"list_specialties\",\n        \"description\": \"List every medical specialty this clinic offers. Call this before telling a patient the clinic does or does not have a given specialty. The list is exhaustive.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {},\n          \"required\": [],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"find_doctors\",\n        \"description\": \"List the clinic's doctors and the weekdays each one works. Optionally filter to a single specialty. Use this to offer a patient their choice of doctor.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"specialty\": {\n              \"type\": [\n                \"string\",\n                \"null\"\n              ],\n              \"description\": \"Exact specialty to filter by. Null returns every doctor.\"\n            }\n          },\n          \"required\": [\n            \"specialty\"\n          ],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_available_slots\",\n        \"description\": \"Find appointment slots that are genuinely free on a specific date. Returns only bookable slots \\u2014 anything already taken, blocked, or belonging to a doctor who is not working is already excluded. Never guess availability; call this.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"date\": {\n              \"type\": \"string\",\n              \"description\": \"The date to check, as YYYY-MM-DD.\"\n            },\n            \"specialty\": {\n              \"type\": [\n                \"string\",\n                \"null\"\n              ],\n              \"description\": \"Only slots for doctors in this specialty. Null for all.\"\n            },\n            \"doctor_id\": {\n              \"type\": [\n                \"integer\",\n                \"null\"\n              ],\n              \"description\": \"Only slots for this doctor. Null for all.\"\n            }\n          },\n          \"required\": [\n            \"date\",\n            \"specialty\",\n            \"doctor_id\"\n          ],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_my_appointments\",\n        \"description\": \"List the appointments belonging to the patient you are currently talking to. This is the ONLY way to learn about a patient's bookings, and it returns only theirs.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {},\n          \"required\": [],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    },\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"book_appointment\",\n        \"description\": \"Book one specific slot for the patient you are talking to. Only call this after the patient has explicitly confirmed a slot you offered them.\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"availability_id\": {\n              \"type\": \"integer\",\n              \"description\": \"The availability_id of the slot, exactly as returned by get_available_slots.\"\n            },\n            \"booked_for_date\": {\n              \"type\": \"string\",\n              \"description\": \"The date to book, as YYYY-MM-DD.\"\n            }\n          },\n          \"required\": [\n            \"availability_id\",\n            \"booked_for_date\"\n          ],\n          \"additionalProperties\": false\n        },\n        \"strict\": true\n      }\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const msg = j.choices && j.choices[0] && j.choices[0].message;",
+                  "if (msg && msg.tool_calls && msg.tool_calls.length) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", msg.tool_calls[0].id);",
+                  "    pm.collectionVariables.set(\"tool_call_name\", msg.tool_calls[0].function.name);",
+                  "    pm.collectionVariables.set(\"tool_call_args\", msg.tool_calls[0].function.arguments);",
+                  "    console.log(\"tool call ->\", msg.tool_calls[0].function.name, msg.tool_calls[0].function.arguments);",
+                  "}",
+                  "if (msg && msg.content) console.log(\"reply ->\", msg.content);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));",
+                  "console.log(\"finish_reason ->\", j.choices && j.choices[0] && j.choices[0].finish_reason);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.8 Vision / image input",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "When a message carries an image, `content` becomes an **array of parts** instead of a string.\n\n`image_url.url` takes either a public URL or a `data:image/png;base64,...` data URI (that is how you would send an S3 chat attachment \u2014 see CLAUDE.md 3.5).\n\n`detail`: `\"low\"` (fixed ~85 tokens, cheap), `\"high\"` (tiled, far more tokens), `\"auto\"`.\nFlip it and watch `usage.prompt_tokens` move.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"What is in this image? One sentence.\"\n        },\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gray666.png/320px-Gray666.png\",\n            \"detail\": \"low\"\n          }\n        }\n      ]\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const msg = j.choices && j.choices[0] && j.choices[0].message;",
+                  "if (msg && msg.tool_calls && msg.tool_calls.length) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", msg.tool_calls[0].id);",
+                  "    pm.collectionVariables.set(\"tool_call_name\", msg.tool_calls[0].function.name);",
+                  "    pm.collectionVariables.set(\"tool_call_args\", msg.tool_calls[0].function.arguments);",
+                  "    console.log(\"tool call ->\", msg.tool_calls[0].function.name, msg.tool_calls[0].function.arguments);",
+                  "}",
+                  "if (msg && msg.content) console.log(\"reply ->\", msg.content);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));",
+                  "console.log(\"finish_reason ->\", j.choices && j.choices[0] && j.choices[0].finish_reason);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.9 Logprobs (see the model's uncertainty)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "`logprobs: true` + `top_logprobs: N` returns, per generated token, the log-probability of what it picked and the N runners-up.\n\nUseful for actually SEEING what temperature does: at a confident token the top choice sits near 0.0 logprob (probability \u2248 1) and alternatives are far below; at a creative one they bunch together.\n\nLook in `choices[0].logprobs.content[]`. `top_logprobs` max is 20.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Complete: the capital of France is\"\n    }\n  ],\n  \"logprobs\": true,\n  \"top_logprobs\": 5,\n  \"max_completion_tokens\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "const msg = j.choices && j.choices[0] && j.choices[0].message;",
+                  "if (msg && msg.tool_calls && msg.tool_calls.length) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", msg.tool_calls[0].id);",
+                  "    pm.collectionVariables.set(\"tool_call_name\", msg.tool_calls[0].function.name);",
+                  "    pm.collectionVariables.set(\"tool_call_args\", msg.tool_calls[0].function.arguments);",
+                  "    console.log(\"tool call ->\", msg.tool_calls[0].function.name, msg.tool_calls[0].function.arguments);",
+                  "}",
+                  "if (msg && msg.content) console.log(\"reply ->\", msg.content);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));",
+                  "console.log(\"finish_reason ->\", j.choices && j.choices[0] && j.choices[0].finish_reason);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2 \u00b7 Responses API  (/v1/responses)",
+      "description": "The newer API, and the one chat-service actually uses. Three differences that matter:\n\n1. **`instructions` instead of a system message.** It applies to THIS call only and is not carried forward by chaining \u2014 which is why `OpenAiToolCallingBrain` re-sends it every round.\n2. **`previous_response_id` chaining.** OpenAI holds the history; you hold a pointer. That pointer is your `bot_conversation_state.last_response_id`.\n3. **`output` is an array of items**, not a single message. Text is at `output[].content[].text`; tool calls are their own `type: \"function_call\"` items.\n\nResponse ids age out server-side \u2014 a stale one gives a 404 with `param: \"previous_response_id\"`, which is exactly what `ExpiredConversationException` catches.",
+      "item": [
+        {
+          "name": "2.1 Minimal call",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses"
+              ]
+            },
+            "description": "`input` can be a plain string \u2014 the simplest possible call.\n\n**Where the answer is:** `output[0].content[0].text`. There is no `choices` array here.\n**Tokens:** `usage.input_tokens` / `usage.output_tokens` (named differently from Chat Completions' `prompt_tokens`/`completion_tokens` \u2014 worth knowing when you write the logging).\n\nThe test script stores `id` into `{{previous_response_id}}` for request 2.3.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"input\": \"In one sentence, what is a WebSocket?\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Captures the response id so the \"Chained turn\" request can use it,",
+                  "// and the first function call id so the tool round-2 request can use it.",
+                  "const j = pm.response.json();",
+                  "if (j.id) {",
+                  "    pm.collectionVariables.set(\"previous_response_id\", j.id);",
+                  "    pm.collectionVariables.set(\"response_id\", j.id);",
+                  "    console.log(\"response id ->\", j.id);",
+                  "}",
+                  "const call = (j.output || []).find(o => o.type === \"function_call\");",
+                  "if (call) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", call.call_id);",
+                  "    console.log(\"function call ->\", call.name, call.arguments);",
+                  "}",
+                  "// The assistant's visible text lives in output[].content[].text, NOT at the top level.",
+                  "const text = (j.output || [])",
+                  "    .flatMap(o => o.content || [])",
+                  "    .filter(c => c.type === \"output_text\")",
+                  "    .map(c => c.text)",
+                  "    .join(\"\");",
+                  "if (text) console.log(\"reply ->\", text);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.2 instructions + structured input",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses"
+              ]
+            },
+            "description": "`instructions` is the system prompt's replacement. **It is per-call** \u2014 chaining does not carry it forward. Sending it only on the first round is the live bug CLAUDE.md 3.10 records: the round that wrote the reply had no rules and started emitting markdown.\n\n`input` as an array uses `role`/`content` much like messages, but content parts are `input_text` / `input_image` / `input_file`.\n\n**Other knobs here:**\n- `max_output_tokens` \u2014 the Responses name for the reply cap.\n- `store` \u2014 `true` (default) keeps the response server-side so it can be chained to or retrieved later. Set `false` and request 2.3 will fail: nothing to chain to.\n- `metadata` \u2014 up to 16 arbitrary key/value pairs echoed back; handy for tagging experiments you will grep later.\n- `truncation: \"auto\"` lets the API drop middle-of-conversation items rather than erroring when a long chain exceeds the context window.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are DoctorAssistant, the appointment assistant for Super Clinic. Today is 2026-09-02 (Wednesday). Greet the patient by name on your first reply. Never guess availability \\u2014 always call get_available_slots. Never claim a specialty exists without calling list_specialties. Plain text only, no markdown.\",\n  \"input\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"input_text\",\n          \"text\": \"Hi, I'm Sarthak. Do you have a cardiologist?\"\n        }\n      ]\n    }\n  ],\n  \"temperature\": 0.3,\n  \"max_output_tokens\": 300,\n  \"store\": true,\n  \"metadata\": {\n    \"experiment\": \"postman-playground\",\n    \"turn\": \"1\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Captures the response id so the \"Chained turn\" request can use it,",
+                  "// and the first function call id so the tool round-2 request can use it.",
+                  "const j = pm.response.json();",
+                  "if (j.id) {",
+                  "    pm.collectionVariables.set(\"previous_response_id\", j.id);",
+                  "    pm.collectionVariables.set(\"response_id\", j.id);",
+                  "    console.log(\"response id ->\", j.id);",
+                  "}",
+                  "const call = (j.output || []).find(o => o.type === \"function_call\");",
+                  "if (call) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", call.call_id);",
+                  "    console.log(\"function call ->\", call.name, call.arguments);",
+                  "}",
+                  "// The assistant's visible text lives in output[].content[].text, NOT at the top level.",
+                  "const text = (j.output || [])",
+                  "    .flatMap(o => o.content || [])",
+                  "    .filter(c => c.type === \"output_text\")",
+                  "    .map(c => c.text)",
+                  "    .join(\"\");",
+                  "if (text) console.log(\"reply ->\", text);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.3 Chained turn (previous_response_id)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses"
+              ]
+            },
+            "description": "**Run 2.2 first** \u2014 `{{previous_response_id}}` is filled in by its test script.\n\nSend ONLY the new message. OpenAI already holds the prior turns, so your input tokens do not grow with conversation length the way request 1.3's do. This is the whole mechanism behind `bot_conversation_state.last_response_id`.\n\n**Two things to actually try:**\n1. Drop `instructions` here and ask something the rules cover ('use markdown') \u2014 it obeys, proving instructions are NOT inherited.\n2. Paste a made-up id like `resp_deadbeef` and send: you get the 404 with `param: \"previous_response_id\"` that `OpenAiBotBrain` detects and recovers from by retrying once without it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are DoctorAssistant, the appointment assistant for Super Clinic. Today is 2026-09-02 (Wednesday). Greet the patient by name on your first reply. Never guess availability \\u2014 always call get_available_slots. Never claim a specialty exists without calling list_specialties. Plain text only, no markdown.\",\n  \"previous_response_id\": \"{{previous_response_id}}\",\n  \"input\": \"Yes, Thursday morning works. What times do you have?\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Captures the response id so the \"Chained turn\" request can use it,",
+                  "// and the first function call id so the tool round-2 request can use it.",
+                  "const j = pm.response.json();",
+                  "if (j.id) {",
+                  "    pm.collectionVariables.set(\"previous_response_id\", j.id);",
+                  "    pm.collectionVariables.set(\"response_id\", j.id);",
+                  "    console.log(\"response id ->\", j.id);",
+                  "}",
+                  "const call = (j.output || []).find(o => o.type === \"function_call\");",
+                  "if (call) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", call.call_id);",
+                  "    console.log(\"function call ->\", call.name, call.arguments);",
+                  "}",
+                  "// The assistant's visible text lives in output[].content[].text, NOT at the top level.",
+                  "const text = (j.output || [])",
+                  "    .flatMap(o => o.content || [])",
+                  "    .filter(c => c.type === \"output_text\")",
+                  "    .map(c => c.text)",
+                  "    .join(\"\");",
+                  "if (text) console.log(\"reply ->\", text);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.4 Structured output (text.format)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses"
+              ]
+            },
+            "description": "Same `BotDecision` schema as request 1.5, but the Responses API nests it under **`text.format`** and flattens it \u2014 `{type, name, strict, schema}` \u2014 rather than Chat Completions' `response_format.json_schema.{...}` wrapper. Same three strict-mode rules apply.\n\nThis is Version 1's whole safety story: the model fills in `action: \"BOOK\"` and an `availability_id`, and **Java decides whether to honour it** (`BookingService` re-checks the slot against live data). The model requests; it never writes.\n\n**Try:** ask it to book something absurd ('book me for last Tuesday') and see it still return a schema-valid object \u2014 proof that the schema constrains SHAPE, never truth. That is why the re-check exists.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are DoctorAssistant, the appointment assistant for Super Clinic. Today is 2026-09-02 (Wednesday). Greet the patient by name on your first reply. Never guess availability \\u2014 always call get_available_slots. Never claim a specialty exists without calling list_specialties. Plain text only, no markdown. Available: availability_id 12, Dr. Rao, 11:00-11:30 on 2026-09-07.\",\n  \"input\": \"Yes, book the 11:00 on the 7th please.\",\n  \"text\": {\n    \"format\": {\n      \"type\": \"json_schema\",\n      \"name\": \"bot_decision\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"reply_to_user\": {\n            \"type\": \"string\",\n            \"description\": \"The text the patient sees.\"\n          },\n          \"action\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"BOOK\",\n              \"NONE\"\n            ]\n          },\n          \"availability_id\": {\n            \"type\": [\n              \"integer\",\n              \"null\"\n            ]\n          },\n          \"booked_for_date\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ],\n            \"description\": \"YYYY-MM-DD\"\n          }\n        },\n        \"required\": [\n          \"reply_to_user\",\n          \"action\",\n          \"availability_id\",\n          \"booked_for_date\"\n        ],\n        \"additionalProperties\": false\n      }\n    }\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Captures the response id so the \"Chained turn\" request can use it,",
+                  "// and the first function call id so the tool round-2 request can use it.",
+                  "const j = pm.response.json();",
+                  "if (j.id) {",
+                  "    pm.collectionVariables.set(\"previous_response_id\", j.id);",
+                  "    pm.collectionVariables.set(\"response_id\", j.id);",
+                  "    console.log(\"response id ->\", j.id);",
+                  "}",
+                  "const call = (j.output || []).find(o => o.type === \"function_call\");",
+                  "if (call) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", call.call_id);",
+                  "    console.log(\"function call ->\", call.name, call.arguments);",
+                  "}",
+                  "// The assistant's visible text lives in output[].content[].text, NOT at the top level.",
+                  "const text = (j.output || [])",
+                  "    .flatMap(o => o.content || [])",
+                  "    .filter(c => c.type === \"output_text\")",
+                  "    .map(c => c.text)",
+                  "    .join(\"\");",
+                  "if (text) console.log(\"reply ->\", text);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.5 Tool calling \u2014 round 1 (model asks)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses"
+              ]
+            },
+            "description": "The same five clinic tools, in the Responses API's **flat** tool shape: `{type, name, description, parameters, strict}` \u2014 no nested `function` object.\n\n**What comes back:** `output[]` containing one or more `{type: \"function_call\", call_id, name, arguments}` items. `arguments` is a JSON **string**. Note it is `call_id` here, not `id` as in Chat Completions.\n\n`tool_choice`: `\"auto\"` | `\"none\"` | `\"required\"` | `{\"type\":\"function\",\"name\":\"get_available_slots\"}`.\n\n**Worth noticing:** `get_my_appointments` takes no arguments at all. That is deliberate \u2014 the executor scopes it to the authenticated session, so the model cannot ask about another patient. Try 'what appointments does Vaidehi have?' and watch it be unable to express the question.\n\nThe test script saves `{{tool_call_id}}` and `{{previous_response_id}}` for request 2.6.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are DoctorAssistant, the appointment assistant for Super Clinic. Today is 2026-09-02 (Wednesday). Greet the patient by name on your first reply. Never guess availability \\u2014 always call get_available_slots. Never claim a specialty exists without calling list_specialties. Plain text only, no markdown.\",\n  \"input\": \"What have you got free on the 7th of September?\",\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"name\": \"list_specialties\",\n      \"description\": \"List every medical specialty this clinic offers. Call this before telling a patient the clinic does or does not have a given specialty. The list is exhaustive.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {},\n        \"required\": [],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    },\n    {\n      \"type\": \"function\",\n      \"name\": \"find_doctors\",\n      \"description\": \"List the clinic's doctors and the weekdays each one works. Optionally filter to a single specialty. Use this to offer a patient their choice of doctor.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"specialty\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ],\n            \"description\": \"Exact specialty to filter by. Null returns every doctor.\"\n          }\n        },\n        \"required\": [\n          \"specialty\"\n        ],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    },\n    {\n      \"type\": \"function\",\n      \"name\": \"get_available_slots\",\n      \"description\": \"Find appointment slots that are genuinely free on a specific date. Returns only bookable slots \\u2014 anything already taken, blocked, or belonging to a doctor who is not working is already excluded. Never guess availability; call this.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"date\": {\n            \"type\": \"string\",\n            \"description\": \"The date to check, as YYYY-MM-DD.\"\n          },\n          \"specialty\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ],\n            \"description\": \"Only slots for doctors in this specialty. Null for all.\"\n          },\n          \"doctor_id\": {\n            \"type\": [\n              \"integer\",\n              \"null\"\n            ],\n            \"description\": \"Only slots for this doctor. Null for all.\"\n          }\n        },\n        \"required\": [\n          \"date\",\n          \"specialty\",\n          \"doctor_id\"\n        ],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    },\n    {\n      \"type\": \"function\",\n      \"name\": \"get_my_appointments\",\n      \"description\": \"List the appointments belonging to the patient you are currently talking to. This is the ONLY way to learn about a patient's bookings, and it returns only theirs.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {},\n        \"required\": [],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    },\n    {\n      \"type\": \"function\",\n      \"name\": \"book_appointment\",\n      \"description\": \"Book one specific slot for the patient you are talking to. Only call this after the patient has explicitly confirmed a slot you offered them.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"availability_id\": {\n            \"type\": \"integer\",\n            \"description\": \"The availability_id of the slot, exactly as returned by get_available_slots.\"\n          },\n          \"booked_for_date\": {\n            \"type\": \"string\",\n            \"description\": \"The date to book, as YYYY-MM-DD.\"\n          }\n        },\n        \"required\": [\n          \"availability_id\",\n          \"booked_for_date\"\n        ],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    }\n  ],\n  \"tool_choice\": \"auto\",\n  \"parallel_tool_calls\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Captures the response id so the \"Chained turn\" request can use it,",
+                  "// and the first function call id so the tool round-2 request can use it.",
+                  "const j = pm.response.json();",
+                  "if (j.id) {",
+                  "    pm.collectionVariables.set(\"previous_response_id\", j.id);",
+                  "    pm.collectionVariables.set(\"response_id\", j.id);",
+                  "    console.log(\"response id ->\", j.id);",
+                  "}",
+                  "const call = (j.output || []).find(o => o.type === \"function_call\");",
+                  "if (call) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", call.call_id);",
+                  "    console.log(\"function call ->\", call.name, call.arguments);",
+                  "}",
+                  "// The assistant's visible text lives in output[].content[].text, NOT at the top level.",
+                  "const text = (j.output || [])",
+                  "    .flatMap(o => o.content || [])",
+                  "    .filter(c => c.type === \"output_text\")",
+                  "    .map(c => c.text)",
+                  "    .join(\"\");",
+                  "if (text) console.log(\"reply ->\", text);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.6 Tool calling \u2014 round 2 (you answer)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses"
+              ]
+            },
+            "description": "**Run 2.5 first.** Both `{{previous_response_id}}` and `{{tool_call_id}}` are auto-filled.\n\nCompare with request 1.7: because the chain already holds the assistant's tool call, you send **only** the `function_call_output` \u2014 no replayed history, no echoed assistant message.\n\n`output` is always a **string**; stringify your JSON result.\n\n`instructions` is re-sent deliberately. Drop it and you reproduce the exact bug from CLAUDE.md 3.10 \u2014 this is the round that writes the user-visible reply, and without the rules it formats in markdown and skips the greeting.\n\nLoop until a response comes back with no `function_call` items; that one carries the reply.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are DoctorAssistant, the appointment assistant for Super Clinic. Today is 2026-09-02 (Wednesday). Greet the patient by name on your first reply. Never guess availability \\u2014 always call get_available_slots. Never claim a specialty exists without calling list_specialties. Plain text only, no markdown.\",\n  \"previous_response_id\": \"{{previous_response_id}}\",\n  \"input\": [\n    {\n      \"type\": \"function_call_output\",\n      \"call_id\": \"{{tool_call_id}}\",\n      \"output\": \"[{\\\"availability_id\\\":12,\\\"doctor\\\":\\\"Dr. Rao\\\",\\\"specialty\\\":\\\"Cardiology\\\",\\\"start\\\":\\\"11:00\\\",\\\"end\\\":\\\"11:30\\\"},{\\\"availability_id\\\":13,\\\"doctor\\\":\\\"Dr. Rao\\\",\\\"specialty\\\":\\\"Cardiology\\\",\\\"start\\\":\\\"11:30\\\",\\\"end\\\":\\\"12:00\\\"}]\"\n    }\n  ],\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"name\": \"list_specialties\",\n      \"description\": \"List every medical specialty this clinic offers. Call this before telling a patient the clinic does or does not have a given specialty. The list is exhaustive.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {},\n        \"required\": [],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    },\n    {\n      \"type\": \"function\",\n      \"name\": \"find_doctors\",\n      \"description\": \"List the clinic's doctors and the weekdays each one works. Optionally filter to a single specialty. Use this to offer a patient their choice of doctor.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"specialty\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ],\n            \"description\": \"Exact specialty to filter by. Null returns every doctor.\"\n          }\n        },\n        \"required\": [\n          \"specialty\"\n        ],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    },\n    {\n      \"type\": \"function\",\n      \"name\": \"get_available_slots\",\n      \"description\": \"Find appointment slots that are genuinely free on a specific date. Returns only bookable slots \\u2014 anything already taken, blocked, or belonging to a doctor who is not working is already excluded. Never guess availability; call this.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"date\": {\n            \"type\": \"string\",\n            \"description\": \"The date to check, as YYYY-MM-DD.\"\n          },\n          \"specialty\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ],\n            \"description\": \"Only slots for doctors in this specialty. Null for all.\"\n          },\n          \"doctor_id\": {\n            \"type\": [\n              \"integer\",\n              \"null\"\n            ],\n            \"description\": \"Only slots for this doctor. Null for all.\"\n          }\n        },\n        \"required\": [\n          \"date\",\n          \"specialty\",\n          \"doctor_id\"\n        ],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    },\n    {\n      \"type\": \"function\",\n      \"name\": \"get_my_appointments\",\n      \"description\": \"List the appointments belonging to the patient you are currently talking to. This is the ONLY way to learn about a patient's bookings, and it returns only theirs.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {},\n        \"required\": [],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    },\n    {\n      \"type\": \"function\",\n      \"name\": \"book_appointment\",\n      \"description\": \"Book one specific slot for the patient you are talking to. Only call this after the patient has explicitly confirmed a slot you offered them.\",\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"availability_id\": {\n            \"type\": \"integer\",\n            \"description\": \"The availability_id of the slot, exactly as returned by get_available_slots.\"\n          },\n          \"booked_for_date\": {\n            \"type\": \"string\",\n            \"description\": \"The date to book, as YYYY-MM-DD.\"\n          }\n        },\n        \"required\": [\n          \"availability_id\",\n          \"booked_for_date\"\n        ],\n        \"additionalProperties\": false\n      },\n      \"strict\": true\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Captures the response id so the \"Chained turn\" request can use it,",
+                  "// and the first function call id so the tool round-2 request can use it.",
+                  "const j = pm.response.json();",
+                  "if (j.id) {",
+                  "    pm.collectionVariables.set(\"previous_response_id\", j.id);",
+                  "    pm.collectionVariables.set(\"response_id\", j.id);",
+                  "    console.log(\"response id ->\", j.id);",
+                  "}",
+                  "const call = (j.output || []).find(o => o.type === \"function_call\");",
+                  "if (call) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", call.call_id);",
+                  "    console.log(\"function call ->\", call.name, call.arguments);",
+                  "}",
+                  "// The assistant's visible text lives in output[].content[].text, NOT at the top level.",
+                  "const text = (j.output || [])",
+                  "    .flatMap(o => o.content || [])",
+                  "    .filter(c => c.type === \"output_text\")",
+                  "    .map(c => c.text)",
+                  "    .join(\"\");",
+                  "if (text) console.log(\"reply ->\", text);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.7 Streaming (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses"
+              ]
+            },
+            "description": "Responses streaming is **typed events**, not opaque deltas. Each SSE line has an `event:` name:\n\n- `response.created` \u2014 id assigned; you could store it already.\n- `response.output_text.delta` \u2014 a text fragment. This is the only one your `BotStreamListener` needs to push a chunk over the WebSocket.\n- `response.function_call_arguments.delta` \u2014 tool arguments arriving piecewise.\n- `response.completed` \u2014 carries the **complete** `response` object, `usage` included.\n\nThat last one is the design point in `OpenAiToolCallingBrain.send()`: it streams for latency but returns the assembled `Response`, so everything downstream \u2014 token accounting, the tool loop \u2014 is untouched by streaming.\n\nNo `stream_options` needed here; usage is in the completed event either way.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"Plain text only, no markdown.\",\n  \"input\": \"Explain Kafka partition ordering in about 120 words.\",\n  \"stream\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2.8 Reasoning model (effort + summary)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/responses",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses"
+              ]
+            },
+            "description": "Reasoning models (o-series, GPT-5 family) think before answering. Two things change:\n\n- `reasoning.effort`: `\"minimal\"` | `\"low\"` | `\"medium\"` | `\"high\"`. Higher = more hidden reasoning tokens = better on hard problems, more cost, more latency.\n- `reasoning.summary: \"auto\"` returns a readable summary of the thinking as a `type: \"reasoning\"` item in `output[]`.\n\n**The bill:** check `usage.output_tokens_details.reasoning_tokens`. You pay for thinking you never see. Run this at `low` then `high` and compare \u2014 that gap is the real cost of reasoning models.\n\n`temperature` and `top_p` are **not supported** on these models; leave them out or you get a 400.\n\nSet `{{reasoning_model}}` to whichever reasoning model your key can reach.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{reasoning_model}}\",\n  \"input\": \"A doctor works Mon/Thu 09:00-12:00 in 30-min slots. 09:30, 10:00 and 11:00 are booked on Thursday. List every free Thursday slot.\",\n  \"reasoning\": {\n    \"effort\": \"low\",\n    \"summary\": \"auto\"\n  },\n  \"max_output_tokens\": 2000\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Captures the response id so the \"Chained turn\" request can use it,",
+                  "// and the first function call id so the tool round-2 request can use it.",
+                  "const j = pm.response.json();",
+                  "if (j.id) {",
+                  "    pm.collectionVariables.set(\"previous_response_id\", j.id);",
+                  "    pm.collectionVariables.set(\"response_id\", j.id);",
+                  "    console.log(\"response id ->\", j.id);",
+                  "}",
+                  "const call = (j.output || []).find(o => o.type === \"function_call\");",
+                  "if (call) {",
+                  "    pm.collectionVariables.set(\"tool_call_id\", call.call_id);",
+                  "    console.log(\"function call ->\", call.name, call.arguments);",
+                  "}",
+                  "// The assistant's visible text lives in output[].content[].text, NOT at the top level.",
+                  "const text = (j.output || [])",
+                  "    .flatMap(o => o.content || [])",
+                  "    .filter(c => c.type === \"output_text\")",
+                  "    .map(c => c.text)",
+                  "    .join(\"\");",
+                  "if (text) console.log(\"reply ->\", text);",
+                  "if (j.usage) console.log(\"tokens ->\", JSON.stringify(j.usage));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.9 Retrieve a stored response",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/responses/{{response_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses",
+                "{{response_id}}"
+              ]
+            },
+            "description": "Fetches a response you stored earlier (`store: true`, the default). Auto-filled from the last call you made.\n\nProves the chaining model concretely: the transcript lives on OpenAI's side, which is why chat-service stores one id per conversation instead of a transcript \u2014 and why a chat-service restart loses no context.\n\nA 404 here means the id aged out \u2014 the same expiry `ExpiredConversationException` handles."
+          },
+          "response": []
+        },
+        {
+          "name": "2.10 List a response's input items",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/responses/{{response_id}}/input_items?limit=20&order=asc",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses",
+                "{{response_id}}",
+                "input_items"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "order",
+                  "value": "asc"
+                }
+              ]
+            },
+            "description": "Shows what the API considered the INPUT for that response \u2014 including everything inherited through `previous_response_id`.\n\nRun this after request 2.6 and you can read the whole reconstructed chain: your message, the model's function call, your function_call_output. It is the closest thing to reading the chain from the outside \u2014 the API-side equivalent of your `bot_prompt_log` table."
+          },
+          "response": []
+        },
+        {
+          "name": "2.11 Delete a stored response",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/responses/{{response_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "responses",
+                "{{response_id}}"
+              ]
+            },
+            "description": "Deletes the stored response. Anything chained off it breaks afterwards.\n\nWorth doing once deliberately, then re-running request 2.3 against the deleted id, so you have seen the exact 404 body your `ExpiredConversationException` detection keys on (`error.param == \"previous_response_id\"`)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3 \u00b7 Utilities",
+      "description": "Housekeeping calls \u2014 check your key works, see what models it can reach, count tokens before spending them.",
+      "item": [
+        {
+          "name": "3.1 List models",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/models",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "models"
+              ]
+            },
+            "description": "Every model this key can reach. **Run this first** \u2014 it is the cheapest possible proof that your key, base URL and auth header are all correct. A 401 here means the key is wrong; a 401 anywhere else after this passes means something in that specific request is."
+          },
+          "response": []
+        },
+        {
+          "name": "3.2 Retrieve one model",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/models/{{model}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "models",
+                "{{model}}"
+              ]
+            },
+            "description": "Metadata for whatever `{{model}}` is set to. Mostly useful as a spelling check \u2014 a typo'd model name is a 404 here rather than a confusing failure mid-experiment."
+          },
+          "response": []
+        },
+        {
+          "name": "3.3 Embeddings (bonus)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/embeddings",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "embeddings"
+              ]
+            },
+            "description": "Not used by the bot, but the natural next step if you ever want semantic search over chat history \u2014 'find messages about cardiology' rather than a LIKE query.\n\nReturns a `data[0].embedding` float vector. `dimensions` can shrink it (1536 \u2192 256) with modest quality loss and much cheaper storage.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"text-embedding-3-small\",\n  \"input\": \"I need to book a cardiologist appointment\",\n  \"dimensions\": 256\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://api.openai.com/v1",
+      "type": "string",
+      "description": "Swap for a proxy or Azure-style endpoint if you ever need to."
+    },
+    {
+      "key": "api_key",
+      "value": "sk-REPLACE-WITH-YOUR-OPENAI-KEY",
+      "type": "string",
+      "description": "PLACEHOLDER. Put your real key in the CURRENT VALUE column only \u2014 Postman does not export current values, so the real key never leaves your machine."
+    },
+    {
+      "key": "model",
+      "value": "gpt-4o-mini",
+      "type": "string",
+      "description": "Matches this repo's OPENAI_MODEL default (chat-service/src/main/resources/application.yml)."
+    },
+    {
+      "key": "reasoning_model",
+      "value": "o4-mini",
+      "type": "string",
+      "description": "Used only by request 2.8. Change to whichever reasoning model your key can reach."
+    },
+    {
+      "key": "previous_response_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-captured from the last /responses call. This is what bot_conversation_state.last_response_id holds."
+    },
+    {
+      "key": "response_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-captured. Used by 2.9-2.11."
+    },
+    {
+      "key": "tool_call_id",
+      "value": "",
+      "type": "string",
+      "description": "Auto-captured from a tool-calling round 1. Used by 1.7 and 2.6."
+    },
+    {
+      "key": "tool_call_name",
+      "value": "",
+      "type": "string",
+      "description": "Auto-captured, for reading in the Console."
+    },
+    {
+      "key": "tool_call_args",
+      "value": "",
+      "type": "string",
+      "description": "Auto-captured, for reading in the Console."
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Async write path vs direct read path</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body { display: flex; justify-content: center; padding: 24px; }
+  svg { width: 100%; max-width: 1100px; height: auto; }
+  text { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #111827; }
+</style>
+</head>
+<body>
+<svg viewBox="0 0 960 645" xmlns="http://www.w3.org/2000/svg" role="img"
+     aria-label="Chat service delivers a message live over WebSocket immediately, while the same message travels asynchronously through Kafka and a consumer before reaching MySQL. History reads go directly to MySQL, so between live delivery and persistence there is a window where a history read can miss the message.">
+  <defs>
+    <marker id="accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4b5563"/>
+    </marker>
+  </defs>
+
+  <!-- Chat service -->
+  <rect x="40" y="215" width="180" height="90" rx="6" fill="none" stroke="#4b5563" stroke-width="2.5"/>
+  <text x="130" y="267" text-anchor="middle" font-size="18" font-weight="600">Chat service</text>
+
+  <!-- Write path (async, accent) -->
+  <text x="300" y="48" font-size="17" font-weight="600" fill="#1d4ed8">Write path — async</text>
+
+  <rect x="300" y="66" width="150" height="70" rx="6" fill="none" stroke="#1d4ed8" stroke-width="2.5"/>
+  <text x="375" y="108" text-anchor="middle" font-size="17" font-weight="600" fill="#1d4ed8">Kafka</text>
+
+  <rect x="520" y="66" width="150" height="70" rx="6" fill="none" stroke="#1d4ed8" stroke-width="2.5"/>
+  <text x="595" y="108" text-anchor="middle" font-size="17" font-weight="600" fill="#1d4ed8">Consumer</text>
+
+  <rect x="740" y="215" width="180" height="90" rx="6" fill="none" stroke="#4b5563" stroke-width="2.5"/>
+  <text x="830" y="255" text-anchor="middle" font-size="18" font-weight="600">MySQL</text>
+  <text x="830" y="279" text-anchor="middle" font-size="16" fill="#4b5563">chatappdb</text>
+
+  <line x1="196" y1="213" x2="298" y2="112" stroke="#1d4ed8" stroke-width="2.5" marker-end="url(#accent)"/>
+  <line x1="450" y1="101" x2="514" y2="101" stroke="#1d4ed8" stroke-width="2.5" marker-end="url(#accent)"/>
+  <line x1="670" y1="112" x2="790" y2="211" stroke="#1d4ed8" stroke-width="2.5" marker-end="url(#accent)"/>
+
+  <!-- Live delivery -->
+  <rect x="300" y="330" width="250" height="70" rx="6" fill="none" stroke="#4b5563" stroke-width="2.5"/>
+  <text x="425" y="372" text-anchor="middle" font-size="17" font-weight="600">Recipient (WebSocket)</text>
+
+  <line x1="180" y1="307" x2="298" y2="358" stroke="#4b5563" stroke-width="2.5" marker-end="url(#gray)"/>
+  <text x="150" y="345" font-size="16" fill="#4b5563">live delivery</text>
+
+  <!-- Read path (direct, dashed) -->
+  <text x="300" y="512" font-size="17" font-weight="600" fill="#4b5563">Read path — direct</text>
+  <path d="M130 307 L130 540 L830 540 L830 309" fill="none" stroke="#4b5563" stroke-width="2.5"
+        stroke-dasharray="8 6" marker-end="url(#gray)"/>
+  <text x="560" y="532" font-size="16" fill="#4b5563">history read</text>
+
+  <!-- Consistency window -->
+  <path d="M552 365 L700 365 L700 300" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="6 5"/>
+  <text x="566" y="410" font-size="16" font-weight="600" fill="#b45309">consistency window:</text>
+  <text x="566" y="432" font-size="16" font-weight="600" fill="#b45309">delivered but not yet saved</text>
+
+  <!-- Trade-off -->
+  <text x="480" y="584" text-anchor="middle" font-size="16" fill="#4b5563">Bought: fast sends — the app never waits for the database.</text>
+  <text x="480" y="608" text-anchor="middle" font-size="16" fill="#4b5563">Paid: a brief window where history reads can miss a just-delivered message.</text>
+  <text x="480" y="632" text-anchor="middle" font-size="16" fill="#4b5563">Acceptable: live messages arrive via WebSocket; history is only read on reconnect.</text>
+</svg>
+</body>
+</html>
