@@ -721,12 +721,29 @@ replies that it is unavailable.
   of a weekday among three dozen rows is exactly what scanning misses, so each
   doctor now carries an explicit `WORKS:` line. Stating the fact positively
   turned an inference into a lookup and the error stopped.
-- **The subtraction error is the one that does not have a prompt fix**, and
-  that is the point. Set arithmetic over stuffed data is not something to
-  prompt harder at — it is what a tool call replaces, by having Java compute
-  the answer (`AvailabilityService` already does, exactly and in one place) and
-  handing the model the result instead of the raw inputs. Version 1 now has the
-  concrete failure that argues for Version 2, which is what it was built for.
+- **The subtraction error has no prompt-WORDING fix — but it does have a
+  prompt-CONTENT fix, and being sloppy about that distinction overstates the
+  case for Version 2.** Telling the model to be careful does not work. But
+  Version 1 could stop shipping the raw inputs and ship the answer instead:
+  have `AvailabilityService` compute the free slots in Java and inject THOSE,
+  in place of the working pattern and the booked list. Still one call, still no
+  tool calling, and the arithmetic is gone because there is no arithmetic left.
+  That option was not taken, and it should be named rather than quietly skipped.
+- **So what tool calling actually buys here is narrower than "correct
+  arithmetic"**: not having to precompute every date up front. The
+  prompt-content fix above would need free slots for the whole horizon × every
+  doctor in every prompt — growing the thing that was already too big — whereas
+  `get_available_slots` is asked for one date, when that date is wanted.
+- **And be precise about what the observation proves**: one failure, on
+  `gpt-4o-mini`, not a measured error rate. Set arithmetic over several dozen
+  stuffed rows is a known weak spot that a stronger model handles better. The
+  finding is real and worth citing; "no prompt can fix this" is not what it
+  shows.
+- **The cross-patient leak is the structural claim, and it is the stronger
+  one.** `get_my_appointments` takes no patient argument at all, so the failure
+  is not unlikely — it is inexpressible, regardless of which model is behind it
+  (3.10). Version 1's fix for the same bug is a prompt that could in principle
+  be ignored. When only one of these two arguments can be made, make that one.
 - Worth being precise about the blast radius: every wrong ANSWER is visible to
   the user, and no wrong WRITE reaches the database. The model never books —
   it requests, and §6.4 re-validates against live data. That separation is why
@@ -789,11 +806,20 @@ substantive argument for this version:
   and asked to subtract — and got it wrong, offering a slot that was in its own
   booked list. `get_available_slots` returns what `AvailabilityService` already
   computed. There is no arithmetic left to get wrong.
+  - **Do not overclaim this one.** V1 could have removed the arithmetic too, by
+    injecting precomputed free slots instead of the raw pattern and bookings
+    (3.9). What tools add is that the answer is fetched **for the one date
+    asked about**, rather than the whole horizon × every doctor having to be
+    precomputed into every prompt. Of the two, this is the weaker argument —
+    real, but a design choice V1 declined rather than one it was incapable of.
 - **The cross-patient leak.** V1 was handed every patient's bookings in one
   unattributed list and misattributed them. `get_my_appointments` takes **no
   patient argument at all** — `ClinicToolExecutor` closes over the authenticated
   user id from the session. The model cannot ask about someone else because the
   question cannot be expressed. Asserted directly in `ClinicToolExecutorTest`.
+  **This is the claim that actually holds unconditionally** — it does not depend
+  on which model is behind it, or on the model cooperating with a prompt rule.
+  Lead with this one.
 
 **The safety property is unchanged.** `book_appointment` still goes through
 `BookingService`, so every validation, the re-check, and the unique constraint
