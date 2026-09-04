@@ -42,3 +42,6 @@ cloudformation/.params/
 # deliberately fake and committed, a billable OpenAI credential is neither.
 # .env.example IS committed, as the template to copy.
 .env
+
+# Angular CLI build cache — local only, never useful in a commit.
+.angular/
