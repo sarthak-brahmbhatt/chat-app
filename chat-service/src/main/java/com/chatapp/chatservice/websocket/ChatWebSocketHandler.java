@@ -1,6 +1,13 @@
 package com.chatapp.chatservice.websocket;
 
+import com.chatapp.chatservice.bot.routing.BotDirectory;
+import com.chatapp.chatservice.bot.routing.BotReply;
+import com.chatapp.chatservice.bot.toolcalling.BotStreamListener;
+import com.chatapp.chatservice.bot.toolcalling.ToolCallingBotService;
+import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
+import com.chatapp.chatservice.dto.BotStreamEvent;
 import com.chatapp.chatservice.dto.ChatMessageRequest;
+import com.chatapp.chatservice.entity.UserType;
 import com.chatapp.chatservice.dto.DeliveredAck;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.dto.TickAck;
@@ -24,6 +31,7 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * The WebSocket connection lifecycle, and how this class hooks into it
@@ -75,18 +83,27 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final ObjectMapper objectMapper;
     private final ChatMessagePublisher chatMessagePublisher;
     private final ChatMessageService chatMessageService;
+    private final BotDirectory botDirectory;
+    private final DoctorAssistantBotService doctorAssistantBotService;
+    private final ToolCallingBotService toolCallingBotService;
 
     public ChatWebSocketHandler(
             JwtValidator jwtValidator,
             ConnectionRegistry connectionRegistry,
             ObjectMapper objectMapper,
             ChatMessagePublisher chatMessagePublisher,
-            ChatMessageService chatMessageService) {
+            ChatMessageService chatMessageService,
+            BotDirectory botDirectory,
+            DoctorAssistantBotService doctorAssistantBotService,
+            ToolCallingBotService toolCallingBotService) {
         this.jwtValidator = jwtValidator;
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
         this.chatMessagePublisher = chatMessagePublisher;
         this.chatMessageService = chatMessageService;
+        this.botDirectory = botDirectory;
+        this.doctorAssistantBotService = doctorAssistantBotService;
+        this.toolCallingBotService = toolCallingBotService;
     }
 
     @Override
@@ -219,8 +236,191 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         Instant sentAt = Instant.now();
 
         sendSingleTickAck(session, request.messageId());
+
+        // The bot branch (CLAUDE.md 3.9 §5.2). Everything above this line is
+        // identical for a bot and a human recipient — same envelope, same
+        // validation, same single tick — because the bot is a real `users` row,
+        // not a special case bolted onto the protocol. Only the DELIVERY differs,
+        // and it has to: a ConnectionRegistry lookup for the bot can only ever
+        // miss, since the bot has no browser and therefore no session.
+        Optional<UserType> botKind = botDirectory.botKindOf(request.recipientId());
+        if (botKind.isPresent()) {
+            switch (botKind.get()) {
+                case BOT -> handleBotMessage(session, senderId, request, sentAt);
+                case BOT_TOOL -> handleToolBotMessage(session, senderId, request, sentAt);
+                default -> log.warn("Recipient {} resolved to unroutable bot kind {}",
+                        request.recipientId(), botKind.get());
+            }
+            return;
+        }
+
         chatMessagePublisher.publish(senderId, request, sentAt);
         deliverIfRecipientConnected(senderId, request, sentAt);
+    }
+
+    /**
+     * Runs one bot turn and sends the reply back down the SAME socket the user
+     * sent on (CLAUDE.md 3.9 §5.3).
+     *
+     * <p>Kafka is bypassed in both directions here, and that is the point of
+     * §5.3's direct writes: Kafka exists to decouple acknowledging a message from
+     * durably storing it (CLAUDE.md 3.4), which is worth doing when the recipient
+     * might be offline. The bot is never offline, and it has to read the
+     * conversation it is part of within the same turn — an insert that lands
+     * asynchronously, possibly after the reply, would leave the next turn's
+     * history missing the message it answers.
+     *
+     * <p>Runs INLINE on the WebSocket's inbound thread, so this user's socket
+     * processes nothing else until the model answers (bounded by
+     * openai.timeout-seconds). Deliberate for Version 1: it keeps the turn
+     * strictly ordered — no chance of two overlapping calls chaining off the same
+     * previous_response_id and interleaving — and one parked thread per user
+     * mid-conversation is nothing against the connection ceiling measured in
+     * CLAUDE.md 3.6. Moving this to an executor is where to start if bot
+     * conversations ever get concurrent enough to matter, and it would need its
+     * own answer for that ordering question.
+     */
+    private void handleBotMessage(
+            WebSocketSession session, String senderId, ChatMessageRequest request, Instant sentAt) throws IOException {
+        String botId = request.recipientId();
+
+        // The SINGLE tick has already been sent by the caller, before this method
+        // and before anything is persisted (CLAUDE.md 3.1/3.4 — a write failure
+        // must never surface to the sender as a failed message). Reaching this
+        // line is what gives it its bot-specific meaning: the recipient resolved
+        // to the bot, so the message is routed and the bot has it.
+
+        BotReply reply = doctorAssistantBotService.handleUserMessage(
+                senderId, botId, request.messageId(), request.content(), sentAt);
+
+        // A second, independent timestamp — the reply genuinely happened later
+        // than the question, and sharing the user message's Instant would render
+        // the two bubbles as simultaneous.
+        Instant repliedAt = Instant.now();
+        chatMessageService.persistBotConversationMessage(
+                reply.messageId(), botId, senderId, reply.content(), repliedAt);
+
+        // Now — and only now — is the USER's message delivered in the sense a bot
+        // conversation means it. Written undelivered on arrival precisely so this
+        // flag and the live double tick below say the same thing: refresh the page
+        // mid-answer and history shows a single tick, matching what the open
+        // socket was showing a moment earlier.
+        chatMessageService.markDelivered(request.messageId());
+
+        // The DOUBLE tick, meaning "the bot has answered" — fired here and
+        // nowhere earlier (CLAUDE.md 3.9).
+        //
+        // In a human conversation the two ticks are "sent" and "reached the
+        // recipient's device". A bot has no device, so the literal translation
+        // would fire both the instant the message arrives: two ticks a
+        // millisecond apart, saying nothing the first one didn't. Repointing the
+        // second one at "the answer exists" makes the pair informative again,
+        // and the gap between them is not padding — it is the model call, the
+        // one genuinely slow step in the turn. The user watches a single tick
+        // for exactly as long as the bot is actually thinking.
+        //
+        // AFTER the reply is persisted, so the tick is never the only evidence
+        // of an answer: if the live push below fails, or the socket died during
+        // the call, the reply is already durable and history will show it. It is
+        // sent BEFORE that push so the tick flip and the bubble arrive in causal
+        // order rather than the reverse.
+        //
+        // Via the registry rather than the `session` in hand: this runs seconds
+        // after the message arrived, so the user may have reconnected onto a
+        // different session by now, or gone entirely — sendDoubleTickIfConnected
+        // resolves the current one and no-ops if there is none.
+        sendDoubleTickIfConnected(senderId, request.messageId());
+
+        // Sent as an ordinary incoming_message, from the bot's user id. The
+        // frontend has no bot-specific code at all: it renders this like any
+        // other message and auto-acks it. That delivered_ack takes the normal
+        // path, which is what marks the BOT's OWN message row delivered — a
+        // separate thing from the double tick above, which is about the USER's
+        // message.
+        IncomingChatMessage incoming = new IncomingChatMessage(
+                "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
+        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
+    }
+
+    /**
+     * The Version 2 tool-calling bot (CLAUDE.md 3.10).
+     *
+     * <p>Identical in shape to {@link #handleBotMessage} above — same direct
+     * writes, same tick timing, same envelope — because everything except how
+     * the model reaches the clinic is deliberately held constant. That is what
+     * makes the two comparable in a demo: put them side by side and the only
+     * difference you can observe is the one that matters.
+     */
+    private void handleToolBotMessage(
+            WebSocketSession session, String senderId, ChatMessageRequest request, Instant sentAt) throws IOException {
+        String botId = request.recipientId();
+
+        // Minted here, before the turn runs, because every stream frame has to
+        // carry the id of the message being written. The client opens a bubble
+        // on that id and grows it; it cannot do that for a message whose id is
+        // only decided once the text is finished.
+        String replyMessageId = UUID.randomUUID().toString();
+        sendStreamEvent(session, BotStreamEvent.start(replyMessageId, botId));
+        // An immediate holding note. The first round — the model deciding which
+        // tool it even needs — takes several seconds and produces neither text
+        // nor a tool call, so without this the bubble opens and then sits
+        // visibly empty for the longest single gap in the turn.
+        sendStreamEvent(session, BotStreamEvent.status(replyMessageId, botId, "Thinking…"));
+
+        BotReply reply = toolCallingBotService.handleUserMessage(
+                senderId, botId, request.messageId(), request.content(), sentAt,
+                replyMessageId,
+                streamListenerFor(session, replyMessageId, botId));
+
+        Instant repliedAt = Instant.now();
+        chatMessageService.persistBotConversationMessage(
+                reply.messageId(), botId, senderId, reply.content(), repliedAt);
+
+        chatMessageService.markDelivered(request.messageId());
+        sendDoubleTickIfConnected(senderId, request.messageId());
+
+        // Still sent in full, and still the authoritative message — the stream
+        // was a preview of exactly this. The client replaces the bubble's text
+        // with this content, so a dropped chunk, a client that ignores the
+        // stream types, or a stream that died halfway all end up correct.
+        IncomingChatMessage incoming = new IncomingChatMessage(
+                "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
+        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
+    }
+
+    /**
+     * Turns the bot's progress into WebSocket frames on the caller's own socket.
+     *
+     * <p>Writes to {@code session} directly rather than through
+     * ConnectionRegistry: this runs synchronously inside the turn, on the thread
+     * that owns this socket, so the session in hand is by definition the live
+     * one. The registry lookup matters for the double tick, which fires seconds
+     * later and may find the user reconnected elsewhere.
+     *
+     * <p>Swallows its own IO failures. A frame that cannot be delivered is a
+     * cosmetic loss — the finished message is still persisted and still sent —
+     * and letting it escape would abandon a turn that was otherwise fine.
+     */
+    private BotStreamListener streamListenerFor(WebSocketSession session, String messageId, String botId) {
+        return new BotStreamListener() {
+            @Override
+            public void onStatus(String humanReadableStatus) {
+                sendStreamEvent(session, BotStreamEvent.status(messageId, botId, humanReadableStatus));
+            }
+
+            @Override
+            public void onTextDelta(String delta) {
+                sendStreamEvent(session, BotStreamEvent.delta(messageId, botId, delta));
+            }
+        };
+    }
+
+    private void sendStreamEvent(WebSocketSession session, BotStreamEvent event) {
+        try {
+            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(event)));
+        } catch (IOException | RuntimeException e) {
+            log.debug("Dropped a {} frame for message {}: {}", event.type(), event.messageId(), e.getMessage());
+        }
     }
 
     private void sendSingleTickAck(WebSocketSession session, String messageId) throws IOException {

@@ -1,6 +1,7 @@
 package com.chatapp.chatservice.kafka;
 
 import com.chatapp.chatservice.dto.ChatMessageRequest;
+import com.chatapp.chatservice.support.ConversationKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -136,10 +137,12 @@ public class ChatMessagePublisher {
      * ids) are free to land on different partitions and be processed in any
      * order relative to each other — nothing requires that, and forcing it
      * would kill the parallelism partitioning exists for, with no benefit.
+     * <p>The value itself now lives in {@link ConversationKey}, because the bot
+     * feature needs the identical key for `bot_conversation_state` — see that
+     * class for why there must be exactly one implementation of it. This method
+     * stays as the name the Kafka-side callers and their tests already use.
      */
     static String conversationKey(String senderId, String recipientId) {
-        return senderId.compareTo(recipientId) < 0
-                ? senderId + ":" + recipientId
-                : recipientId + ":" + senderId;
+        return ConversationKey.of(senderId, recipientId);
     }
 }

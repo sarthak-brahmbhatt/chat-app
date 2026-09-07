@@ -1,4 +1,4 @@
-import { Component, OnInit, inject, signal } from '@angular/core';
+import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { NavigationEnd, Router } from '@angular/router';
 import { filter, map } from 'rxjs';
@@ -16,6 +16,45 @@ export class UserListComponent implements OnInit {
   private readonly router = inject(Router);
 
   readonly users = signal<UserSummary[]>([]);
+
+  /**
+   * The two assistants, pinned above everyone else and always in the same
+   * order: the prompt-stuffing bot first, the tool-calling bot second.
+   *
+   * Ordered explicitly rather than by id or name, because the order IS the
+   * story — they are Version 1 and Version 2 of the same thing, and a demo
+   * that compares them wants them adjacent and in that sequence every time.
+   */
+  readonly bots = computed(() => {
+    const byType = (type: string) => this.users().filter((user) => user.userType === type);
+    return [...byType('BOT'), ...byType('BOT_TOOL')];
+  });
+
+  /** Everyone else, in the order the API returned them. */
+  readonly people = computed(() => this.users().filter((user) => user.userType === 'USER'));
+
+  /**
+   * A short label for a bot's approach, shown under its name.
+   *
+   * Says what makes the two different in three words, so the sidebar itself
+   * carries the comparison rather than relying on someone remembering which
+   * assistant is which mid-conversation.
+   */
+  botSubtitle(user: UserSummary): string {
+    return user.userType === 'BOT_TOOL' ? 'Tool calling' : 'Prompt stuffing';
+  }
+
+  /** Drives the accent colour; see the .bot-1 / .bot-2 rules in styles.css. */
+  botAccentClass(user: UserSummary): string {
+    return user.userType === 'BOT_TOOL' ? 'bot-2' : 'bot-1';
+  }
+
+  /** Initials for the avatar disc — "Dr" style, at most two letters. */
+  initialsOf(user: UserSummary): string {
+    const first = user.firstName?.trim()?.[0] ?? '';
+    const last = user.lastName?.trim()?.[0] ?? '';
+    return (first + last).toUpperCase() || user.username.slice(0, 2).toUpperCase();
+  }
   readonly loading = signal(true);
   readonly errorMessage = signal<string | null>(null);
 
@@ -71,6 +110,10 @@ export class UserListComponent implements OnInit {
         recipientFirstName: user.firstName,
         recipientLastName: user.lastName,
         recipientUsername: user.username,
+        // Forwarded so the chat header can carry the same accent colour as the
+        // sidebar entry — with two assistants answering, the open conversation
+        // should say at a glance which one it is.
+        recipientUserType: user.userType,
       },
     });
   }

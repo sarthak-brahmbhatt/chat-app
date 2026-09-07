@@ -1,2 +1,15 @@
-CREATE DATABASE IF NOT EXISTS userdb;
-CREATE DATABASE IF NOT EXISTS messagedb;
+-- ONE database for the whole application (CLAUDE.md 3.5, build-order step 18).
+--
+-- This REVERSES the original userdb/messagedb split. The bot feature needs to
+-- join across users, messages, doctors, availability and appointments in single
+-- SQL queries; separate databases make that impossible in SQL and force the join
+-- into Java. Both databases already lived in this same MySQL container, so the
+-- isolation was only ever convention, never enforcement — what's given up here is
+-- the per-service data-ownership boundary, deliberately and with eyes open.
+--
+-- No migration path exists on purpose: this project starts fresh locally (drop the
+-- volume and recreate), and AWS is torn down, so there is no production data to
+-- move. Scripts in this directory run ONLY against an empty data volume, so
+-- changing this file has no effect on an existing one — `docker compose down -v`
+-- is what makes a change here take.
+CREATE DATABASE IF NOT EXISTS chatappdb;

@@ -7,6 +7,11 @@
          not /users anymore - that route now redirects here (app.routes.ts). -->
     <a routerLink="/chat" class="back-link" aria-label="Back">←</a>
     <h1>{{ recipientLabel() }}</h1>
+    @if (recipientBadge()) {
+      <span class="header-badge" [class.bot-1]="recipientAccent() === 'bot-1'" [class.bot-2]="recipientAccent() === 'bot-2'">
+        {{ recipientBadge() }}
+      </span>
+    }
   </div>
 
   <div class="messages" #messagesEl (scroll)="onScroll()">
@@ -14,8 +19,20 @@
       <p class="loading-older">Loading older messages…</p>
     }
     @for (bubble of bubbles(); track bubble.messageId) {
-      <div class="bubble" [class.sent]="bubble.direction === 'sent'" [class.received]="bubble.direction === 'received'">
-        <span>{{ bubble.content }}</span>
+      <div
+        class="bubble"
+        [class.sent]="bubble.direction === 'sent'"
+        [class.received]="bubble.direction === 'received'"
+        [class.streaming]="bubble.streaming"
+      >
+        <!-- While the tool-calling bot is looking something up it produces no
+             text at all, and that is most of the wait — so the status note
+             stands in until the first words arrive (CLAUDE.md 3.10). -->
+        @if (bubble.streaming && !bubble.content && bubble.status) {
+          <span class="bot-status">{{ bubble.status }}</span>
+        } @else {
+          <span class="bubble-text">{{ bubble.content }}@if (bubble.streaming) {<span class="caret"></span>}</span>
+        }
         <span class="timestamp">{{ formatTimestamp(bubble.sentAt) }}</span>
         <!-- Tick indicator: '…' while waiting for the server's single-tick
              ack, '✓' once single tick arrives (server received it), '✓✓'

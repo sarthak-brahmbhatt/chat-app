@@ -217,8 +217,32 @@ rather than pure production-necessity (called out where relevant).
   deliberate scope limit — not a gap to silently carry forward.
 
 ### 3.5 Data stores
-- **User DB**: users, credentials.
-- **Message DB**: persisted chat messages (written via Kafka consumer, async).
+- **`chatappdb` — ONE database for everything (revised, step 18).** This
+  REVERSES the original userdb/messagedb split. It holds users and
+  credentials, persisted chat messages, and the bot's tables (3.9).
+  - **Why the reversal**: the bot needs to join across users, messages,
+    doctors, availability and appointments in single queries — most
+    concretely, chat-service has to read `users.user_type` to know a
+    recipient is the bot at all, and the availability subtraction (3.9)
+    joins three tables in one statement. Two databases make that impossible
+    *in SQL* and push the join into Java. Both databases already lived in
+    the same MySQL container, so the isolation was convention, never
+    enforcement.
+  - **What it costs, deliberately**: the per-service data-ownership boundary
+    the split represented. Mitigated at the code level rather than the
+    database level — user-service remains the ONLY writer to `users`, and
+    chat-service's view of it (`entity/AppUser.java`) maps a subset of its
+    columns, pointedly not `password`, and exposes only finders. Nothing
+    enforces that any more; it is a convention held by review.
+  - **One real consequence**: chat-service's Hibernate `ddl-auto: update`
+    would create a PARTIAL `users` table if it won the startup race, leaving
+    user-service to ALTER a NOT NULL `password` column onto it. Ordered
+    away rather than relied upon — user-service gained a healthcheck and
+    chat-service a `depends_on` against it. That dependency is schema
+    ordering only; chat-service still never calls user-service (3.2).
+  - **No migration, by design**: local dev drops the volume and recreates
+    (`docker compose down -v`), and AWS is torn down. `mysql-init/` creates
+    only this one database; everything else is still Hibernate's.
 - **S3**: image storage for chat attachments (mentioned, not yet designed in
   detail).
 
@@ -425,6 +449,420 @@ discussion that weren't written down anywhere else yet.
   IAM user creation manual and out-of-band is intentional: credential
   provisioning is exactly the kind of action that stays a human's call.
 
+### 3.9 DoctorAssistant bot — Version 1 (build-order step 18)
+
+A conversational appointment assistant for a fictional clinic, reachable as an
+ordinary chat contact. Local Docker only — not deployed.
+
+- **Version 1 deliberately uses NO tool calling.** All doctor/availability/
+  appointment data is stuffed into the prompt on every turn, and **structured
+  outputs** let the model signal a booking that Java then executes. This is
+  knowingly the naive approach: it will hit prompt bloat, token cost that grows
+  with every doctor added, and an inability to reason over anything not
+  pre-injected. **Feeling those limits is the point** — Version 2's tools should
+  solve a problem that has actually been measured, not merely described. Hence
+  `bot_token_usage` (below): the argument for tools should be a query, not a
+  claim. Same "learning value over convenience" reasoning as choosing Kafka in
+  3.4 and EC2+ASG in 3.8.
+- **The bot is a real `users` row** (`username: doctorassistant`,
+  `user_type: BOT`, `last_name: NULL`, password = bcrypt of discarded
+  `SecureRandom` noise so nothing can ever present it at `/login`). This is what
+  keeps the frontend user list, the WebSocket envelope (3.1),
+  `messages.sender_id`/`recipient_id`, and conversation history (§4) working
+  **completely unchanged** — to all of them it is just another user. **No
+  frontend code changed for this feature at all.** Seeded by user-service
+  (`BotUserSeeder`), which owns `users` and already has the PasswordEncoder.
+- **`users.user_type`** (`VARCHAR(20) NOT NULL DEFAULT 'USER'`, values
+  `USER | BOT`) is the only thing that distinguishes it, and only chat-service's
+  routing branch looks. AGENT and DOCTOR are deferred (§5) — doctors are
+  reference data here and never log in.
+
+**Where the code lives**: a new `com.chatapp.chatservice.bot` package inside
+chat-service, NOT a separate microservice. It is one branch off an existing
+handler plus its supporting domain; a fourth deployable would be pure overhead.
+
+**Tables** (all in `chatappdb`, all Hibernate-managed):
+- `doctors` — name, specialty (free text, not an enum — see below), `active`.
+- `doctor_availability` — the RECURRING WEEKLY pattern only: `day_of_week`,
+  `start_time`/`end_time` (30-minute slots), `status: AVAILABLE | BLOCKED`.
+  Says nothing about bookings.
+- `appointments` — actual bookings on specific dates. Times are **denormalised
+  deliberately**: a doctor changing their pattern later must not retroactively
+  rewrite what time an existing appointment was booked for.
+- `bot_conversation_state` — `conversation_key` (the SAME canonical pair key
+  Kafka partitions on, now shared via `support/ConversationKey` so there is one
+  implementation rather than two that agree today) → `last_response_id`. See
+  **Conversation memory** below for what this does and does not buy.
+- `bot_token_usage` — one row per model call, with `turn_number`.
+
+**Availability is derived by SUBTRACTION, never stored as a flag** — free time is
+a property of (slot, date), not of the slot, so there is nowhere to put a flag:
+> free(doctor, date) = availability rows matching date's weekday, `status =
+> AVAILABLE`, `doctors.active = TRUE` **MINUS** appointments for that doctor on
+> that date with `status = BOOKED`
+
+- **Expressed in exactly ONE place** — `AvailabilityService`, over a single
+  three-table query. The realistic second implementation subtracts bookings but
+  forgets `doctors.active`, reads as obviously correct, and silently offers
+  appointments with a doctor on leave. `AvailabilityServiceTest` asserts each
+  filter separately against a real database (H2) rather than a mock, since the
+  thing under test *is* a query.
+- **Soft deletes are FORWARD-LOOKING only.** `BLOCKED` and `active = FALSE` mean
+  "no NEW bookings from here on" — never "cancel what exists", never a physical
+  delete (historical appointments still reference those rows). Already-booked
+  appointments are honoured regardless; the doctor shows up. So there are two
+  query directions and confusing them is how a patient with a real appointment
+  gets told they have none: forward-looking ("what can I book?") applies every
+  filter; backward-looking ("what exists?") reads `appointments` directly and
+  applies none.
+
+**Tick semantics for a bot conversation — the two ticks mean DIFFERENT things
+(revised).** This is the one place bot conversations deviate from 3.1's
+tick vocabulary, deliberately:
+
+| | Human conversation | Bot conversation |
+|---|---|---|
+| **Single tick** | chat-service received it | chat-service received it **and routed it to the bot** — "the bot got your message" |
+| **Double tick** | reached the recipient's device (`delivered_ack`) | the bot's reply has come back from OpenAI **and been persisted** — "the bot has answered" |
+
+- **Why not the literal translation.** A bot has no device, so "reached the
+  recipient's device" is true the instant the message arrives — both ticks would
+  fire a millisecond apart and the second would tell the user nothing the first
+  didn't. Repointing it at "the answer exists" makes the pair informative again.
+- **The gap between them is not padding — it IS the model call**, the one
+  genuinely slow step in the turn. So the user watches a single tick for exactly
+  as long as the bot is actually thinking, which is real feedback rather than
+  decoration, and needs no separate typing-indicator mechanism.
+- **The single tick keeps its existing ordering — fired before ANY persistence**
+  (3.1/3.4: a write failure must never surface to the sender as a failed
+  message). Only the double tick moved.
+- **The persisted `delivered` flag tracks the same meaning**, which is why the
+  user's message is now written UNDELIVERED and flipped when the reply lands.
+  Inserting it pre-delivered would make a page refresh mid-answer render a
+  double tick for an answer that does not exist yet — the open socket and the
+  reloaded page disagreeing about the same message. Nothing else would ever flip
+  it: the bot sends no `delivered_ack`, and the reconnect sweep (§4) only looks
+  at rows where the RECONNECTING user is the recipient, which here is the bot.
+- The double tick fires **after** the reply is persisted but **before** it is
+  pushed, so the tick is never the only evidence of an answer (if the push
+  fails, the reply is already durable and history shows it) and the flip
+  precedes the bubble rather than trailing it.
+
+**Message flow** — no new endpoint, no new socket path, no frontend change. The
+user sends a normal message with `recipientId` = the bot's user id.
+1. `ChatWebSocketHandler` sends the **single tick** exactly as always (3.1 —
+   unchanged and deliberately not reordered: 3.4's "a write failure must never
+   surface as a failed message" applies here too).
+2. If `BotDirectory.isBot(recipientId)`, divert — **no `ConnectionRegistry`
+   lookup**, which for the bot could only ever miss. Reaching this branch is
+   what gives the single tick its bot-specific meaning: routed, and the bot has
+   it.
+3. The user's message is persisted **synchronously, bypassing Kafka**, written
+   **undelivered**. Kafka exists to decouple acking from durably storing when a
+   recipient may be offline (3.4); the bot never is, and it must read its own
+   conversation within the same turn — an insert landing after the reply would
+   leave the next turn's history missing the message it answers.
+4. Fresh clinic data is queried **every turn, uncached** — at five doctors that
+   is trivial, and a cache's staleness would be a correctness bug (offering a
+   slot that is gone), not a performance trade.
+5. The Responses API is called over **plain blocking HTTP**, with
+   `previous_response_id` chaining if a prior turn exists (see the memory note
+   below for what happens when that id has expired).
+6. **If `action = BOOK`: validate and write BEFORE any reply is sent** (below).
+7. The reply is persisted (undelivered — the user DOES have a browser and will
+   ack it the ordinary way).
+8. **The user's message row is marked delivered and the double tick fires** —
+   "the bot has answered".
+9. The reply is sent as a normal `incoming_message` from the bot's user id,
+   indistinguishable on the wire from a human's.
+10. `last_response_id` is stored and a `bot_token_usage` row written.
+
+**Target behaviour**: the three sample conversations in
+[`docs/bot-requirements.md`](docs/bot-requirements.md), which is the source
+requirement, now in the repo rather than only in a chat window. Each one drove
+a concrete prompt rule, and each rule exists because replaying the sample
+against the bot exposed a gap — see `BotPromptBuilder` and its test.
+
+**The OpenAI call**:
+- **Prompt stuffing (§6.1's deliberate naivety)**, injected every turn: all
+  active doctors + specialties; all `AVAILABLE` pattern rows; all `BOOKED`
+  appointments for the next 7 days; today's date and current time (the model has
+  no clock); and **the DISTINCT specialty list read from the database at request
+  time**, which the prompt declares closed. That last one is what makes "sorry,
+  we have no dermatologist" work instead of the model inventing one — inventing
+  a plausible specialty is a far more fluent continuation than refusing. Free
+  text, not an enum, so seeding a doctor is the whole operation.
+  - Also injected, beyond the spec: an explicit **date → weekday list** for the
+    horizon. The model has no calendar any more than it has a clock, and
+    "next Tuesday" otherwise resolves to a confident, frequently wrong date.
+  - The prompt goes in the API's `instructions` field, NOT as a conversation
+    message. With chaining, instructions apply to the current call only and are
+    not carried forward — so each turn gets fresh data. As a message, every
+    turn's snapshot would accumulate, be re-billed forever, and leave the model
+    reading several contradictory versions of what is booked.
+- **Structured output** (`BotDecision`): `reply_to_user`, `action: BOOK | NONE`,
+  `availability_id` (nullable), `booked_for_date` (nullable). **The model
+  decides; Java acts** — the model can never write to the database. The SDK
+  derives a strict JSON schema from the record, so a reply that omits or invents
+  a field is not something to handle, it is something that cannot be produced.
+- **Booking: validate and write before replying** — (1) re-check the slot is
+  genuinely still free under the rules above, since the prompt was a snapshot
+  and not a lock; (2) verify the date's weekday matches the availability row's;
+  (3) insert; (4) only then send `reply_to_user`. On any failure the model's text
+  is **discarded entirely** and a Java-written message sent instead — that text
+  was written assuming success, and sending it tells a patient they have an
+  appointment nobody made. Also rejected: dates in the past (the subtraction is
+  date-agnostic and would report last Monday free), and unparseable dates (the
+  schema constrains the field to a *string*, so "next Tuesday" satisfies it).
+- **Explicitly not needed** (§7 of the design): no WebSocket to OpenAI (one
+  request, one reply — that is HTTP); no WebFlux (reactive is a concurrency
+  model, and the existing WebSocket already pushes to the browser from ordinary
+  blocking MVC code); no tool calling; no streaming.
+- **Not Spring AI**, called against the official `com.openai:openai-java` SDK
+  directly — same learning-value reasoning as 3.4/3.8. The cost is named rather
+  than discovered later: swapping to Bedrock is real rewrite work against
+  SDK-specific classes, not a config change.
+
+**Config**: `OPENAI_API_KEY` via a **gitignored `.env`** at the repo root, which
+Compose reads automatically (`.env.example` is the committed template). Model
+name configurable, never hardcoded. **A missing key is a valid state, not a
+startup failure** — chat-service's real job is human chat, so an optional
+feature must not become a hard dependency of the whole service; the bot simply
+replies that it is unavailable.
+
+**Conversation memory — borrowed, and NOT long-term:**
+- Multi-turn memory is one stored `last_response_id`, replayed as
+  `previous_response_id`. **Nothing about the conversation is stored here** —
+  OpenAI holds the prior turns, and this side holds a pointer. That is what
+  keeps this service from accumulating a transcript per conversation, and it
+  means a chat-service restart loses no context.
+- **That retention is not indefinite.** OpenAI ages response ids out
+  server-side, so a conversation resumed after a long enough gap presents an id
+  the API no longer knows. This is the ordinary fate of every idle
+  conversation, not a fault.
+- **Handled, not prevented**: `OpenAiBotBrain` recognises that specific error
+  (a 404 whose `param` is `previous_response_id`, with a looser message-text
+  fallback) and raises `ExpiredConversationException`;
+  `DoctorAssistantBotService` retries **once, without the stale id**, which
+  starts a fresh chain. The new id is then stored as normal, so the
+  conversation self-heals rather than paying for two calls on every subsequent
+  turn. Logged at INFO — a conversation hitting this repeatedly means the
+  overwrite isn't happening and cost is quietly doubling. The user sees a bot
+  that has forgotten the earlier exchange, which is exactly what happened, not
+  an error.
+- **This is recovery, NOT memory.** Chaining gives continuity within a live
+  conversation and nothing more. **"The bot remembers you from days ago" is a
+  different feature and is explicitly NOT covered by `previous_response_id`** —
+  it would require storing conversation history ourselves and replaying it into
+  each call. **Deferred to Version 2** (§5), alongside tool calling. Worth being
+  precise about, because the chaining mechanism looks like durable memory right
+  up until the day it silently isn't.
+  - Note the cost that deferral avoids for now: replaying our own history would
+    make input tokens grow with conversation length on top of the stuffed
+    clinic data — the second of the two compounding curves `bot_token_usage`'s
+    `turn_number` exists to separate. Version 2 should have those numbers
+    before choosing a replay strategy (full history, a window, or summarised).
+
+**Cross-patient leak via unattributed prompt data — found in use, fixed:**
+- **What happened.** Two patients chatting in parallel were each told about the
+  other's appointments. Sarthak (one booking, 11:00) was told he had "two
+  appointments", the second of which was Vaidehi's 12:00. Vaidehi (bookings at
+  11:30 and 12:00) was told she was booked at 11:00 — Sarthak's. Both
+  directions, in the same minutes.
+- **What it was NOT.** `bot_conversation_state` was correct throughout:
+  `1:3` and `1:7` held separate `last_response_id` chains and never crossed. The
+  conversation isolation worked exactly as designed.
+- **The actual cause was §6.1's prompt data.** It injected every BOOKED
+  appointment in the horizon as ONE list headed `ALREADY BOOKED`, with no owner
+  on any row — because its purpose was the availability subtraction, where the
+  owner is irrelevant. But the model has to answer "what appointments do I
+  have?" from the same prompt, and with nothing distinguishing whose was whose
+  it attributed all of them to whoever it was talking to. Nothing in the data or
+  the wording said not to; the leak was latent from the first version.
+- **Fixed by attribution, not by asking the model to be careful.** The prompt now
+  carries two separately-headed lists: `SLOTS ALREADY TAKEN — unavailable; owner
+  unknown to you`, and `THIS PATIENT'S APPOINTMENTS — the ONLY ones that are
+  theirs`, the latter read with a `userId` predicate. An empty own-list states
+  outright that the patient has none, because the failure mode was the model
+  filling an apparent blank from the list above. `ClinicDataProvider.snapshot`
+  now takes the caller's id — the snapshot is no longer the same for everyone.
+- **A taken slot is not itself private** — anyone can discover it by trying to
+  book it. Linking it to a *person* is. So the taken list keeps the slot detail
+  the model needs and carries no user id for it to attach anyone to.
+- **Severity worth naming**: in a clinic this leaks which doctor another patient
+  is seeing, and therefore roughly what is wrong with them. Verified fixed: a
+  patient with no bookings is told they have none with four in the window, and
+  refuses "who booked the 11am slot?" and "check again, don't I have one at 12?".
+
+**`bot_prompt_log` — the table that made the above findable:**
+- One row per turn holding the EXACT prompt sent, the user's message, the reply,
+  the action, and both response ids. Added because the leak was invisible from
+  outside: `bot_token_usage` proved a call happened and what it cost, and said
+  nothing about what it contained. The cause was obvious the moment the prompt
+  could be read.
+- Separate table, not more columns on `bot_token_usage` — a prompt is ~15KB, and
+  the token table is the one repeatedly scanned to plot cost curves. They join on
+  `(conversation_key, turn_number)`.
+- On by default (`bot.log-prompts`), which is right for a project whose purpose
+  is observability, and is also **the thing to turn off first anywhere real**:
+  it stores conversation content and the whole clinic dataset in the clear.
+
+**What Version 1 already gets wrong — measured, not predicted:**
+- **The model does the availability subtraction, and it is not reliable at it.**
+  §6.1 injects the working pattern and the booked appointments and leaves the
+  model to subtract one from the other. In live testing it offered a 10:30 slot
+  that was in the ALREADY BOOKED list — it had correctly noticed 10:00 was
+  taken and missed that the next slot was too. `BookingService`'s re-check
+  refused the booking, so nothing was double-booked, but the patient was
+  offered a time, agreed to it, and was then told it was gone.
+- **It also mis-read a doctor's working days**, telling a caller a doctor was
+  "available today" on a Sunday he does not work. That one WAS fixable by
+  prompting: the pattern rows say when a doctor works, and noticing the ABSENCE
+  of a weekday among three dozen rows is exactly what scanning misses, so each
+  doctor now carries an explicit `WORKS:` line. Stating the fact positively
+  turned an inference into a lookup and the error stopped.
+- **The subtraction error has no prompt-WORDING fix — but it does have a
+  prompt-CONTENT fix, and being sloppy about that distinction overstates the
+  case for Version 2.** Telling the model to be careful does not work. But
+  Version 1 could stop shipping the raw inputs and ship the answer instead:
+  have `AvailabilityService` compute the free slots in Java and inject THOSE,
+  in place of the working pattern and the booked list. Still one call, still no
+  tool calling, and the arithmetic is gone because there is no arithmetic left.
+  That option was not taken, and it should be named rather than quietly skipped.
+- **So what tool calling actually buys here is narrower than "correct
+  arithmetic"**: not having to precompute every date up front. The
+  prompt-content fix above would need free slots for the whole horizon × every
+  doctor in every prompt — growing the thing that was already too big — whereas
+  `get_available_slots` is asked for one date, when that date is wanted.
+- **And be precise about what the observation proves**: one failure, on
+  `gpt-4o-mini`, not a measured error rate. Set arithmetic over several dozen
+  stuffed rows is a known weak spot that a stronger model handles better. The
+  finding is real and worth citing; "no prompt can fix this" is not what it
+  shows.
+- **The cross-patient leak is the structural claim, and it is the stronger
+  one.** `get_my_appointments` takes no patient argument at all, so the failure
+  is not unlikely — it is inexpressible, regardless of which model is behind it
+  (3.10). Version 1's fix for the same bug is a prompt that could in principle
+  be ignored. When only one of these two arguments can be made, make that one.
+- Worth being precise about the blast radius: every wrong ANSWER is visible to
+  the user, and no wrong WRITE reaches the database. The model never books —
+  it requests, and §6.4 re-validates against live data. That separation is why
+  a demonstrably unreliable Version 1 is still safe to run.
+
+**Accepted tradeoffs, named:**
+- `appointments` has an **unconditional** unique constraint on
+  `(availability_id, booked_for_date)`. It closes the check-then-write race a
+  re-read cannot, and is only correct while cancellation is out of scope — a
+  `CANCELLED_*` row would otherwise block that slot permanently, and MySQL has
+  no partial unique index to say "at most one BOOKED row".
+- **The model call runs inline on the WebSocket's inbound thread**, bounded by
+  `openai.timeout-seconds`. That keeps turns strictly ordered, so two
+  overlapping calls cannot chain off the same `previous_response_id`. Moving it
+  to an executor is where to start if bot conversations get concurrent enough to
+  matter, and it would need its own answer to that ordering question.
+- **A database failure during a bot turn IS visible to the user**, as an apology
+  rather than a reply — unlike the human path, which Kafka insulates. Honest:
+  without a persisted turn the bot could not have answered coherently anyway.
+- **A failed model call leaves `last_response_id` untouched**, so the next turn
+  still chains onto the last good response rather than the failure silently
+  wiping the conversation's memory.
+
+
+### 3.10 DoctorAssistant bot — Version 2, tool calling (build-order step 19)
+
+The same clinic, reached through OpenAI **tool calling** instead of prompt
+stuffing. Satisfies the second half of the source requirement's "implemented
+using" list ([`docs/bot-requirements.md`](docs/bot-requirements.md)).
+
+- **A SECOND bot, not a replacement.** `user_type = BOT_TOOL`, username
+  `doctorassistant-tools`, display name "DoctorAssistant (Tools)". Both bots
+  are seeded, both appear in the user list, both answer at once, and both write
+  to the same `bot_token_usage` and `bot_prompt_log`. The comparison is then a
+  single query rather than an assertion — which was the whole reason for
+  building the naive one first.
+- **Everything except the model interaction is held constant** — same direct
+  writes bypassing Kafka, same tick timing, same envelope, same
+  `ChatWebSocketHandler` shape. Put the two side by side in a demo and the only
+  observable difference is the one that matters.
+
+**What is shared, and what is not.** The package was reorganised by concern for
+this: `bot/clinic` (doctors, availability, appointments, booking) and
+`bot/conversation` (chain state, token usage, prompt log) are used unchanged by
+both; `bot/promptstuffing` and `bot/toolcalling` hold what differs.
+`BookingService` was changed to take a `BookingRequest` rather than Version 1's
+`BotDecision`, so the shared clinic layer knows nothing about any bot's reply
+format.
+
+**The five tools** (`ClinicTool`, executed by `ClinicToolExecutor`):
+`list_specialties`, `find_doctors`, `get_available_slots`,
+`get_my_appointments`, `book_appointment`. All `strict: true`; optional
+arguments are expressed as nullable types, since strict mode requires every
+property to be listed as required.
+
+**Two of Version 1's failures become structurally unreachable**, which is the
+substantive argument for this version:
+
+- **The availability arithmetic.** V1 was handed the schedule and the bookings
+  and asked to subtract — and got it wrong, offering a slot that was in its own
+  booked list. `get_available_slots` returns what `AvailabilityService` already
+  computed. There is no arithmetic left to get wrong.
+  - **Do not overclaim this one.** V1 could have removed the arithmetic too, by
+    injecting precomputed free slots instead of the raw pattern and bookings
+    (3.9). What tools add is that the answer is fetched **for the one date
+    asked about**, rather than the whole horizon × every doctor having to be
+    precomputed into every prompt. Of the two, this is the weaker argument —
+    real, but a design choice V1 declined rather than one it was incapable of.
+- **The cross-patient leak.** V1 was handed every patient's bookings in one
+  unattributed list and misattributed them. `get_my_appointments` takes **no
+  patient argument at all** — `ClinicToolExecutor` closes over the authenticated
+  user id from the session. The model cannot ask about someone else because the
+  question cannot be expressed. Asserted directly in `ClinicToolExecutorTest`.
+  **This is the claim that actually holds unconditionally** — it does not depend
+  on which model is behind it, or on the model cooperating with a prompt rule.
+  Lead with this one.
+
+**The safety property is unchanged.** `book_appointment` still goes through
+`BookingService`, so every validation, the re-check, and the unique constraint
+apply identically. The model requests a booking; it still cannot make one.
+
+**The loop** (`OpenAiToolCallingBrain`): send prompt + tools → while the
+response contains function calls, execute them and send the outputs back chained
+to that response → the response with no calls carries the reply. Capped at
+`MAX_ROUNDS = 5`; hitting it is a bug worth seeing, not a normal path.
+
+- **`instructions` is re-sent on EVERY round.** Found live: it applies to one
+  call and is NOT carried forward by `previous_response_id` — the chain carries
+  the conversation, not the rules. Sending it only on the first round left the
+  round that actually writes the reply with no behavioural prompt at all, which
+  showed as a skipped greeting and markdown formatting the prompt forbids.
+- Token usage is summed across every round, or the comparison would flatter
+  Version 2 by counting a fraction of what it spent.
+
+**Measured, on the same clinic and the same conversations:**
+
+| | V1 prompt-stuffing | V2 tool-calling |
+|---|---|---|
+| avg system prompt | **14,915 chars** | **3,341 chars** |
+| avg input tokens/turn | **5,536** | **2,768** |
+| range | 4,741 – 7,285 | 1,349 – 3,807 |
+
+V1's floor rises with every doctor added, because the whole clinic is in every
+prompt. V2's does not — it pays per lookup instead, and only for what the
+conversation actually needed.
+
+**Accepted tradeoffs:**
+- **Latency is worse, and visibly so.** A turn needing three rounds is three
+  sequential API calls: 10-18s observed, against 3-6s for V1. The single tick
+  sits there for all of it. Streaming (§5) would hide some of this.
+- **`bot_prompt_log.tool_calls`** (new column, null for V1) records the trace.
+  Without it V2's log would show a small prompt and a reply with nothing in
+  between — the tool calls ARE what it looked at, and the cross-patient leak
+  showed what happens when a turn cannot be reconstructed.
+- The two bots duplicate their orchestration deliberately rather than sharing a
+  base class. They are meant to be read side by side, and an abstraction over
+  both would hide the difference the pair exists to demonstrate.
+
+
 ## 4. Finalized API / sequence flows
 
 - `POST /register` (username, password, firstName, lastName) → User service checks
@@ -443,9 +881,23 @@ discussion that weren't written down anywhere else yet.
   returns single tick immediately → publishes async to Kafka for DB persistence
   → delivers live to Browser B if connected → Browser B acknowledges → Chat
   service returns double tick to Browser A.
+- Bot chat flow (WebSocket, same envelope as any other chat — CLAUDE.md 3.9):
+  Browser A sends a message with `recipientId` = the bot's user id → Chat
+  service returns single tick immediately → recognises `user_type = BOT` and
+  diverts instead of doing a ConnectionRegistry lookup → persists the message
+  synchronously (bypassing Kafka), already marked delivered, and returns the
+  double tick → queries fresh clinic data and the conversation's
+  `last_response_id` → calls the OpenAI Responses API → validates and writes
+  any booking BEFORE replying → persists the reply and delivers it to Browser A
+  as an ordinary `incoming_message` from the bot's id → records the new
+  response id and a token-usage row. Browser A's client auto-acks that reply
+  exactly as it would a human's, so the bot's own message reaches double tick
+  through the normal path.
+
 - `GET /conversations/{otherUserId}/messages` (JWT in header) → Chat service
   fetches the persisted conversation between the authenticated caller and
-  `otherUserId` from messagedb, oldest-to-newest → 200 OK + a message list
+  `otherUserId` from `chatappdb`'s `messages` table, oldest-to-newest → 200 OK
+  + a message list
   (empty list + "No messages yet." if there's no history), or 401 on
   missing/invalid/expired token. The Angular chat window calls this once, on
   open, to populate history before the live WebSocket connection is made (see
@@ -499,13 +951,19 @@ discussion that weren't written down anywhere else yet.
   - **A conversation with an `otherUserId` that doesn't correspond to any
     real user returns the exact same response as a real user with no shared
     history: `{"messages": [], "message": "No messages yet."}`.** This is
-    deliberate, not an unhandled edge case: messagedb has no users table and
-    chat-service has no dependency on user-service for this endpoint (see
-    3.2's service-boundary reasoning), so there is structurally no way to
-    distinguish "this user doesn't exist" from "this user exists but you've
-    never messaged them" without adding a new cross-service call purely to
-    validate a path parameter — real, unrequested coupling this pass
-    intentionally avoids.
+    deliberate, not an unhandled edge case. **The original reasoning was that
+    this was structurally impossible** — messagedb had no users table, and
+    checking would have meant a new cross-service call to user-service purely
+    to validate a path parameter (3.2), which that pass declined to add.
+    **Step 18's chatappdb consolidation (3.5) removed that impossibility**:
+    chat-service can now read `users` directly, so the endpoint COULD
+    distinguish the two cases with a local join and no new coupling at all.
+    It deliberately still doesn't. Telling an authenticated caller which user
+    ids exist turns this endpoint into a user-enumeration oracle, and the
+    identical-response design is the same anti-enumeration reasoning /login
+    already uses (3.3). What changed is the justification, not the behaviour —
+    it is now a choice rather than a constraint, which is worth knowing before
+    someone "fixes" it.
   - **CORS**: a new `WebMvcConfig` (chat-service's first) scopes
     `addCorsMappings` to `/conversations/**` specifically, allowing the same
     origins already trusted for the WebSocket handshake (`localhost:4200`,
@@ -569,6 +1027,31 @@ discussion that weren't written down anywhere else yet.
 - Detailed HA/DR design
 - Multi-instance registry + pub/sub implementation (only needed once single-instance
   capacity is proven insufficient)
+- ~~Bot Version 2's tool calling~~ — **BUILT, see 3.10.** Both requirement items
+  are now satisfied: Responses API (3.9) and tool calling (3.10). The two bots
+  run side by side so the difference is demonstrable rather than described.
+- **Bot LONG-TERM conversation memory** — "remembers you from days ago". Version
+  1's `previous_response_id` chaining is NOT this and must not be mistaken for
+  it (3.9): OpenAI's retention of a response id expires, and an expired chain is
+  handled by starting a fresh one. Real long-term memory means storing
+  conversation history ourselves and replaying it into each call — a Version 2
+  decision, with its own token-cost consequences to weigh against the numbers
+  Version 1 will have produced by then.
+- Bot appointment CANCELLATION. Load-bearing beyond its own absence: the
+  unconditional unique constraint on `appointments` (3.9) assumes cancelled
+  rows never appear, and `AppointmentStatus`'s `CANCELLED_*` constants exist
+  only so the subtraction predicate is already `= BOOKED` rather than "any row".
+- Bot response STREAMING — Version 1 sends one whole reply. Adding it later
+  means relaying OpenAI's SSE chunks over the existing WebSocket.
+- Human-agent transfer and the `AGENT` user type; `DOCTOR` as a user type
+  (doctors are reference data — they never log in or chat).
+- Amazon Bedrock, and any other provider swap. Noted rather than merely
+  deferred: bypassing Spring AI (3.9) means this is real rewrite work against
+  OpenAI-SDK-specific classes, not a config change.
+- AWS deployment OF THE BOT — local Docker only. The CloudFormation template's
+  database bootstrap was still updated to `chatappdb` (3.5), because a stack
+  brought up with the old names would fail every query against a database that
+  was never created, pointing at nothing.
 - Offline message CONTENT re-delivery / a full offline-message queue — the
   reconnect-time delivery sweep (§4) closes the DELIVERY-STATUS gap (a
   reconnecting recipient's pending messages get marked delivered, and the
@@ -703,3 +1186,16 @@ discussion that weren't written down anywhere else yet.
         once pagination makes 50+ message conversations the normal case
         being tested here, so it's fixed as part of this same pass rather
         than filed separately.
+18. DoctorAssistant appointment bot, Version 1 — no tool calling (see 3.9).
+    Consolidates userdb + messagedb into `chatappdb` first (3.5), then adds the
+    bot as a real BOT-typed `users` row, four new tables, and one routing branch
+    in `ChatWebSocketHandler`. No frontend change of any kind. Version 2's tool
+    calling is deliberately deferred until the naive approach's cost is
+    measurable in `bot_token_usage` rather than asserted (§5).
+19. DoctorAssistant bot, Version 2 — tool calling (see 3.10). A second
+    BOT_TOOL user alongside Version 1, sharing the clinic and conversation
+    packages unchanged. Measured on the same conversations: average prompt
+    14,915 -> 3,341 chars, average input 5,536 -> 2,768 tokens per turn, and
+    two of Version 1's live failures — the availability arithmetic and the
+    cross-patient leak — become structurally unreachable rather than merely
+    prompted against.

@@ -2,16 +2,19 @@ spring:
   application:
     name: chat-service
 
-  # --- MySQL connection: the Message DB (messagedb), CLAUDE.md 3.5, build-order
-  # step 8 --- Same ${VAR:default} dual-mode pattern as user-service's datasource
-  # config: MYSQL_HOST unset (native run) -> localhost:3306, the host port
+  # --- MySQL connection: chatappdb (CLAUDE.md 3.5, build-order steps 8 and 18) ---
+  # Same ${VAR:default} dual-mode pattern as user-service's datasource config:
+  # MYSQL_HOST unset (native run) -> localhost:3306, the host port
   # docker-compose.yml publishes MySQL on; MYSQL_HOST=mysql (containerized run,
-  # set by docker-compose.yml) -> the mysql container's Docker-DNS name. Points at
-  # messagedb specifically, not userdb — a different database in the SAME MySQL
-  # instance user-service already uses (see mysql-init/01-init-databases.sql,
-  # which created both databases back at build-order step 1).
+  # set by docker-compose.yml) -> the mysql container's Docker-DNS name.
+  #
+  # Step 18 pointed this at `chatappdb` — the SAME database user-service now uses,
+  # not merely the same MySQL instance as before. chat-service still owns
+  # `messages` and the bot tables, but it can now also READ `users` (see
+  # entity/AppUser.java) to tell a BOT recipient from a human one, which is
+  # exactly the cross-table reach the old userdb/messagedb split forbade.
   datasource:
-    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/messagedb
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/chatappdb
     username: ${MYSQL_USER:root}
     password: ${MYSQL_PASSWORD:root}
 
@@ -78,6 +81,64 @@ spring:
 # SAME JWT_SECRET environment variable in both services' native run configuration.
 jwt:
   secret: ${JWT_SECRET:dev-only-insecure-jwt-signing-secret-change-me-before-any-real-deployment}
+
+# --- DoctorAssistant bot / OpenAI Responses API (CLAUDE.md 3.9, build-order
+# step 18) ---
+# The API key follows the same "never hardcode a secret" rule as jwt.secret above,
+# but WITHOUT a usable default: an OpenAI key is a real, billable credential, so
+# there is no dev-only placeholder that could sensibly stand in for one. An empty
+# value is therefore a legitimate, expected state (nobody has configured a key
+# yet) rather than a startup error — DoctorAssistantBotService degrades to a
+# fixed apology reply in that case, so the rest of chat-service still runs
+# normally. Set it via a gitignored .env file at the repo root; see .env.example.
+#
+# The model is configurable rather than hardcoded so a later swap stays a config
+# change, and so bot_token_usage.model keeps two different models' numbers
+# comparable rather than silently mixed (CLAUDE.md 3.9's token-tracking point).
+openai:
+  api-key: ${OPENAI_API_KEY:}
+  model: ${OPENAI_MODEL:gpt-4o-mini}
+  # Bounds how long a single WebSocket-triggered turn can block. The bot call runs
+  # on the WebSocket's own inbound thread, so an unbounded hang here would pin that
+  # thread indefinitely; 60s is generous for a non-streaming reply and still
+  # finite. Version 1 has no streaming (CLAUDE.md 3.9 / §7 of the design), so the
+  # whole reply lands in one response and this is the only latency knob that matters.
+  timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:60}
+
+bot:
+  # The username of the seeded BOT user row (user-service's BotUserSeeder creates
+  # it; chat-service only ever reads it). Kept as config rather than a constant in
+  # both services so the two cannot drift apart silently — a mismatch would show up
+  # as "the bot never answers" with nothing pointing at the cause.
+  username: ${BOT_USERNAME:doctorassistant}
+  # Must match user-service's bot.tool-username — same drift hazard as above.
+  tool-username: ${BOT_TOOL_USERNAME:doctorassistant-tools}
+  clinic-name: ${BOT_CLINIC_NAME:Super Clinic}
+  # How far ahead §6.1's prompt stuffing reaches when injecting existing bookings.
+  # Deliberately small: this is Version 1's naive "put everything in the prompt"
+  # approach, and the whole point is that this number is what makes token cost
+  # grow. Widening it is how you make the scaling problem visible on purpose.
+  booking-horizon-days: ${BOT_BOOKING_HORIZON_DAYS:7}
+  # Writes the exact prompt of every turn to `bot_prompt_log`, alongside the
+  # reply and the response-id chain. On by default: this project exists to make
+  # the naive approach's behaviour observable, and the first real bug found —
+  # two parallel patients being told each other's appointments — was invisible
+  # from token counts alone and obvious the moment the prompt could be read.
+  #
+  # It stores conversation content and the whole clinic dataset in the clear,
+  # several KB per turn. Fine locally; a retention policy, redaction, or this
+  # switch set to false is what a real deployment would need.
+  log-prompts: ${BOT_LOG_PROMPTS:true}
+  # Writes one row per API CALL to `bot_round_log` — the exact request body and
+  # the exact response, per round. `log-prompts` above records one row per TURN,
+  # holding the prompt built once at the start; that is not what rounds 2 and 3
+  # of a tool-calling turn actually sent. Reading these rows in order is reading
+  # the conversation with the model, and it is the only place the re-sent
+  # instructions and tool schemas can be seen.
+  #
+  # Separate switch because it is the bulkier of the two — roughly 6KB per round
+  # against one prompt per turn — so it can be turned off on its own.
+  log-rounds: ${BOT_LOG_ROUNDS:true}
 
 server:
   port: 8080

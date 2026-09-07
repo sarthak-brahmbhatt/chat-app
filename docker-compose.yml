@@ -121,6 +121,79 @@ services:
       retries: 10
       start_period: 30s
 
+  # A browser-based SQL client for chatappdb — schema, the rows the bot writes to
+  # `appointments`, and the token cost accumulating in `bot_token_usage`, all a
+  # plain SELECT away.
+  #
+  #     docker compose --profile tools up -d adminer
+  #     http://localhost:8083   (System: MySQL, Server: mysql,
+  #                              Username: root, Password: root, DB: chatappdb)
+  #
+  # Behind a PROFILE, so a plain `docker compose up` does not start it. Two
+  # reasons. It is a debugging tool, not part of the application, and it has no
+  # business in the stack whose connection capacity step 11 measures. And an
+  # Adminer started by hand outside Compose is a common thing to have running
+  # already — an unprofiled service here would collide with it on the container
+  # name and break `up` outright, which is a poor trade for a convenience.
+  #
+  # Adminer rather than phpMyAdmin: one ~10MB PHP file versus a whole
+  # application, and no configuration to speak of.
+  #
+  # DEV ONLY. Unauthenticated database access to anything that can reach the
+  # port — fine on a laptop, which is why this exists here and in no
+  # CloudFormation template.
+  adminer:
+    image: adminer:4
+    container_name: chat-app-adminer
+    profiles: ["tools"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8083:8080"
+    environment:
+      # Pre-fills the login form's server field so it is one less thing to
+      # retype; "mysql" is this Compose network's DNS name for the database.
+      ADMINER_DEFAULT_SERVER: mysql
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # The Angular dev server, at http://localhost:4200.
+  #
+  # Containerised so it behaves like everything else in this file: started by
+  # `docker compose up`, and brought back by `restart: unless-stopped` after a
+  # crash or a Docker Desktop restart. It used to be a bare `npm start` on the
+  # host, which meant it was the ONE piece of the stack that quietly died
+  # whenever the terminal that launched it went away — while the five services
+  # around it stayed up for days.
+  #
+  # Still the dev server, not a production build behind nginx: editing a
+  # component and seeing it reload is the point of running it locally at all.
+  # The deployed frontend is a static build on S3/CloudFront (CLAUDE.md 3.8) and
+  # is a different thing entirely.
+  frontend:
+    image: node:24-alpine
+    container_name: chat-app-frontend
+    restart: unless-stopped
+    working_dir: /app
+    ports:
+      - "4200:4200"
+    volumes:
+      # The source, live — this is what makes hot reload work.
+      - ./frontend:/app
+      # node_modules as a NAMED VOLUME layered on top, so the container's Linux
+      # install is not overwritten by (or overwriting) the host's macOS one.
+      # They are built for different platforms and cannot be shared.
+      - frontend-node-modules:/app/node_modules
+    # Installs only when the volume is empty, so a restart is fast; the first
+    # run takes a few minutes. --host 0.0.0.0 is required for the port to be
+    # reachable from outside the container at all. --poll because file-change
+    # events do not cross the macOS bind mount reliably, and without it hot
+    # reload silently stops working.
+    command: sh -c "[ -d node_modules/@angular ] || npm ci; npx ng serve --host 0.0.0.0 --poll 2000"
+    depends_on:
+      user-service:
+        condition: service_healthy
+
   user-service:
     build: ./user-service
     container_name: chat-app-user-service
@@ -143,6 +216,23 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       JWT_SECRET: *jwt-secret
+    # Exists so chat-service can WAIT for this service (see its depends_on below),
+    # not for monitoring. user-service owns the `users` table: Hibernate's
+    # ddl-auto:update creates it at startup here, and BotUserSeeder inserts the
+    # BOT row right after. chat-service READS that table (chatappdb consolidation,
+    # CLAUDE.md 3.5/3.9) and maps only a subset of its columns, so if chat-service
+    # won the startup race it would create a PARTIAL `users` table and user-service
+    # would then have to ALTER a NOT NULL `password` column onto it. Ordering the
+    # two removes that hazard entirely rather than relying on it working out.
+    #
+    # BusyBox wget (present in the eclipse-temurin:21-jre-alpine runtime image);
+    # there is no curl in that image.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     depends_on:
       mysql:
         condition: service_healthy
@@ -178,9 +268,10 @@ services:
       JWT_SECRET: *jwt-secret
       # Same dual-mode reasoning as user-service's MYSQL_* block: these are
       # only real, resolvable hostnames from INSIDE this Compose network.
-      # chat-service now writes to messagedb (build-order step 8) — the same
-      # MySQL container/instance user-service already uses, just a different
-      # database within it (see mysql-init/01-init-databases.sql).
+      # As of build-order step 18 chat-service uses chatappdb — the very same
+      # DATABASE as user-service now, not just the same MySQL container as it
+      # was at step 8 (see mysql-init/01-init-databases.sql for why the
+      # userdb/messagedb split was reversed, and what it cost).
       MYSQL_HOST: mysql
       MYSQL_PORT: "3306"
       MYSQL_USER: root
@@ -188,11 +279,28 @@ services:
       # "kafka:19092" is the PLAINTEXT listener above — the one meant for
       # other containers, not the PLAINTEXT_HOST one published to the host.
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      # --- DoctorAssistant bot (CLAUDE.md 3.9, build-order step 18) ---
+      # Compose automatically reads a `.env` file sitting next to this one and
+      # substitutes ${...} from it, which is the whole mechanism here: the real
+      # key lives in that gitignored .env, never in this committed file (unlike
+      # the deliberately fake dev JWT secret at the top). ":-" supplies an EMPTY
+      # default so `docker compose up` still works with no .env present at all —
+      # chat-service boots fine and the bot answers with a "not configured"
+      # message instead of the container failing to start. See .env.example.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
     depends_on:
       mysql:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      # Not a runtime dependency — chat-service never calls user-service over HTTP
+      # (CLAUDE.md 3.2's service boundary still holds). This is purely a SCHEMA
+      # ordering constraint introduced by the chatappdb consolidation; see the
+      # healthcheck comment on user-service above for what it prevents.
+      user-service:
+        condition: service_healthy
 
 volumes:
   mysql-data:
+  frontend-node-modules:

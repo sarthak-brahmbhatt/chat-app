@@ -8,7 +8,9 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.data.jpa.JpaRepositoriesAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
+import com.chatapp.chatservice.testsupport.BotRepositoryStubs;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.mockito.InOrder;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
@@ -58,7 +60,14 @@ import static org.mockito.Mockito.when;
         JpaRepositoriesAutoConfiguration.class
 })
 @EmbeddedKafka(partitions = 3, topics = KafkaTopicConfig.CHAT_MESSAGES_TOPIC)
-@TestPropertySource(properties = "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}")
+@TestPropertySource(properties = {
+        "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
+        // No demo doctors: the repositories are mocked below, so the seeder
+        // would NPE on a null save() and fail context startup.
+        "bot.seed-demo-data=false"
+})
+// Every bot repository, mocked — see the class for why a JPA-less context needs them.
+@Import(BotRepositoryStubs.class)
 class KafkaEndToEndTest {
 
     @Autowired

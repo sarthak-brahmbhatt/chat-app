@@ -82,7 +82,7 @@ ChatMessage message = new ChatMessage(event.messageId(), event.senderId(),
 chatMessageRepository.save(message);
 ```
 
-- Writes to messagedb's **`messages`** table
+- Writes to chatappdb's **`messages`** table
   (`entity/ChatMessage.java:32`, `@Table(name = "messages")`), one row per
   message, columns `message_id` (unique), `sender_id`, `recipient_id`,
   `content`, `sent_at`, `delivered`.
@@ -199,7 +199,7 @@ sequenceDiagram
     participant WS as ChatWebSocketHandler
     participant KT as Kafka (chat-messages topic)
     participant KC as ChatMessageConsumer
-    participant DB as messagedb.messages
+    participant DB as chatappdb.messages
     actor B as Browser B (recipient)
 
     A->>WS: "message" {messageId, recipientId, content}

@@ -12,7 +12,7 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * The only place in chat-service that talks to messagedb directly — same
+ * The only place in chat-service that reads/writes the messages table — same
  * layering discipline as user-service's UserRepository.
  *
  * existsByMessageId is what makes ChatMessageConsumer's persistence

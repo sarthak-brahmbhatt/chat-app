@@ -10,6 +10,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -17,7 +18,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * The one place messagedb gets read back out for a human to see (as opposed
+ * The one place persisted messages get read back out for a human to see (as opposed
  * to ChatMessageConsumer, which only ever writes to it). Sits between
  * ConversationController (HTTP-only concerns) and ChatMessageRepository
  * (persistence-only concerns) — same layering as UserService/AuthService in
@@ -62,21 +63,28 @@ public class ChatMessageService {
      * this is cursor-based rather than offset-based.
      *
      * "otherUserId doesn't correspond to a real user" and "otherUserId is a
-     * real user I've simply never messaged" are, from THIS service's point
-     * of view, the exact same case, and deliberately return the identical
-     * response - not a design gap. chat-service has no way to tell them
-     * apart: it has no users table of its own (messagedb only ever stores
-     * message rows, never user records - that's userdb, a different
-     * database owned by a different service), and there is no existing
-     * cross-service call anywhere in this system for chat-service to ask
-     * user-service "does this id exist?" Introducing one just for this
-     * would be new service-to-service coupling this architecture has
-     * deliberately avoided everywhere else (CLAUDE.md 3.2's service
-     * boundaries). A caller passing a nonexistent id simply sees the same
-     * "no messages yet" response as a caller starting a real, brand-new
-     * conversation - both are true statements about messagedb's own data,
-     * which is the only thing this service can actually answer questions
-     * about.
+     * real user I've simply never messaged" deliberately return the identical
+     * response - not a design gap.
+     *
+     * The ORIGINAL reason was that telling them apart was impossible:
+     * chat-service had no users table (messages lived in messagedb, users in
+     * userdb, a different database owned by a different service) and there was
+     * no cross-service call for it to ask user-service "does this id exist?".
+     * Adding one purely to validate a path parameter would have been new
+     * coupling this architecture avoids everywhere else (CLAUDE.md 3.2).
+     *
+     * That reason EXPIRED with the chatappdb consolidation (CLAUDE.md 3.5,
+     * build-order step 18). Users and messages now share one database, this
+     * service already reads `users` through AppUserRepository, and the check
+     * would be a local join with no new coupling whatsoever.
+     *
+     * It still returns the same response, now as a choice rather than a
+     * constraint: an endpoint that answers "that user doesn't exist"
+     * differently from "you've never messaged them" is a user-enumeration
+     * oracle for any authenticated caller, and returning one indistinguishable
+     * answer is the same anti-enumeration reasoning /login already uses
+     * (CLAUDE.md 3.3). Worth knowing before someone "fixes" this by adding the
+     * lookup that is now easy to add.
      */
     public ConversationHistoryResponse getConversationHistory(String currentUserId, String otherUserId, Instant before) {
         Pageable mostRecentFirst = PageRequest.of(0, HISTORY_LIMIT, Sort.by("sentAt").descending());
@@ -128,6 +136,48 @@ public class ChatMessageService {
      * sweepUndeliveredForRecipient's own comment for why that's accepted,
      * not locked against.
      */
+    /**
+     * Writes one message of a bot conversation straight to the database,
+     * deliberately bypassing Kafka (CLAUDE.md 3.9 §5.3).
+     *
+     * <p>Kafka sits in the normal path (CLAUDE.md 3.4) to decouple "tell the
+     * sender we got it" from "durably write it", so a slow or briefly failing
+     * database never surfaces to the sender as a failed message. That reasoning
+     * does not transfer here, and following it anyway would actively break
+     * things. The bot has to READ its own conversation state and write an
+     * appointment inside the same turn; an asynchronous insert that may land
+     * after the reply has already been sent gives the next turn a conversation
+     * whose history is missing the message it is answering.
+     *
+     * <p>Both directions of a bot conversation go through here — the user's
+     * message and the bot's reply — so history and the audit trail look exactly
+     * like a human conversation's, which is what lets
+     * {@code GET /conversations/{id}/messages} stay completely unaware that a
+     * bot exists.
+     *
+     * <p>The tradeoff being accepted: a database failure during a bot turn IS
+     * visible to the user, as an apology instead of a reply. That is the honest
+     * outcome, since without a persisted turn the bot could not have answered
+     * coherently anyway.
+     *
+     * <p>Rows are written UNDELIVERED in both directions, and each reaches
+     * delivered by its own route. The bot's reply is acked by the user's browser
+     * like any other incoming message. The user's message to the bot has no
+     * browser to ack it, so ChatWebSocketHandler marks it delivered explicitly —
+     * at the moment the bot's answer is persisted, not on arrival, because for a
+     * bot conversation the double tick means "the bot has answered" (CLAUDE.md
+     * 3.9). Inserting it pre-delivered would make a page refresh during the model
+     * call show a double tick for an answer that does not exist yet.
+     */
+    @Transactional
+    public ChatMessage persistBotConversationMessage(
+            String messageId, String senderId, String recipientId, String content, Instant sentAt) {
+        ChatMessage message = new ChatMessage(messageId, senderId, recipientId, content, sentAt);
+        ChatMessage saved = chatMessageRepository.save(message);
+        log.debug("Persisted bot-conversation message {} ({} -> {})", messageId, senderId, recipientId);
+        return saved;
+    }
+
     public void markDelivered(String messageId) {
         int rowsUpdated = chatMessageRepository.markDelivered(messageId);
         if (rowsUpdated == 0) {

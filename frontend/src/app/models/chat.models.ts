@@ -57,8 +57,32 @@ export interface DeliveredAck {
   senderId: string;
 }
 
+/**
+ * Server -> client, a bot reply being written (CLAUDE.md 3.10).
+ *
+ * Three types, all carrying the messageId the finished message will have.
+ * That id is the thread tying them together: `bot_stream_start` opens an
+ * empty bubble, each `bot_stream_delta` grows it, and `bot_status` shows a
+ * transient "looking something up" note in its place.
+ *
+ * None of these is the real message. The ordinary `incoming_message` still
+ * arrives with the same messageId and REPLACES the bubble's text, which is
+ * what keeps this safe: a dropped frame, or ignoring these types entirely,
+ * still ends at the correct final message.
+ *
+ * Only the tool-calling bot sends these. The prompt-stuffing bot replies in
+ * one piece, which is itself part of the comparison.
+ */
+export interface BotStreamEvent {
+  type: 'bot_stream_start' | 'bot_stream_delta' | 'bot_status';
+  messageId: string;
+  senderId: string;
+  /** The chunk to append, or the status to show. Absent on `bot_stream_start`. */
+  text: string | null;
+}
+
 /** A discriminated union of everything the server can send after auth succeeds. */
-export type ServerChatEvent = TickAck | IncomingChatMessage;
+export type ServerChatEvent = TickAck | IncomingChatMessage | BotStreamEvent;
 
 /**
  * One message from GET /conversations/{otherUserId}/messages

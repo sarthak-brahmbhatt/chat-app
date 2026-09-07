@@ -21,11 +21,22 @@ public class UserSummary {
     private String firstName;
     private String lastName;
 
-    public UserSummary(Long id, String username, String firstName, String lastName) {
+    // USER, BOT or BOT_TOOL. Exposed so the frontend can pin the two bots to the
+    // top of the list and colour them apart — with two assistants answering, a
+    // flat list makes the one you want hard to find and the two hard to tell
+    // apart mid-demo.
+    //
+    // The first time user_type has crossed the API boundary. It says what KIND
+    // of participant this is, which a client legitimately needs in order to
+    // render the list; it says nothing about how either bot works.
+    private String userType;
+
+    public UserSummary(Long id, String username, String firstName, String lastName, String userType) {
         this.id = id;
         this.username = username;
         this.firstName = firstName;
         this.lastName = lastName;
+        this.userType = userType;
     }
 
     public Long getId() {
@@ -42,5 +53,9 @@ public class UserSummary {
 
     public String getLastName() {
         return lastName;
+    }
+
+    public String getUserType() {
+        return userType;
     }
 }

@@ -4,6 +4,7 @@ import { Observable, Subject, filter } from 'rxjs';
 import { CHAT_SERVICE_BASE_URL, CHAT_SERVICE_WS_URL } from './api-config';
 import { AuthService } from './auth.service';
 import {
+  BotStreamEvent,
   ChatMessageRequest,
   ConversationHistoryResponse,
   DeliveredAck,
@@ -53,6 +54,23 @@ export class ChatService {
   );
   readonly tickAcks$: Observable<TickAck> = this.eventsSubject.pipe(
     filter((event): event is TickAck => event.type === 'ack'),
+  );
+
+  /**
+   * Progress frames from the tool-calling bot: a reply being written, and the
+   * "checking availability…" notes it shows while looking things up.
+   *
+   * Deliberately NOT acknowledged and never persisted — these are presentation
+   * only. `incoming_message` remains the real message, and is what gets acked
+   * and what history is built from.
+   */
+  readonly botStream$: Observable<BotStreamEvent> = this.eventsSubject.pipe(
+    filter(
+      (event): event is BotStreamEvent =>
+        event.type === 'bot_stream_start' ||
+        event.type === 'bot_stream_delta' ||
+        event.type === 'bot_status',
+    ),
   );
 
   // 'authFailed' surfaces the one real signal the protocol gives us when the

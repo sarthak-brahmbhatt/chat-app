@@ -13,7 +13,9 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.data.jpa.JpaRepositoriesAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
+import com.chatapp.chatservice.testsupport.BotRepositoryStubs;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.web.socket.CloseStatus;
@@ -68,7 +70,14 @@ import static org.assertj.core.api.Assertions.within;
         HibernateJpaAutoConfiguration.class,
         JpaRepositoriesAutoConfiguration.class
 })
-@TestPropertySource(properties = "jwt.secret=test-only-integration-secret-at-least-32-bytes-long-xyz")
+@TestPropertySource(properties = {
+        "jwt.secret=test-only-integration-secret-at-least-32-bytes-long-xyz",
+        // No demo doctors: the repositories are mocked below, so the seeder
+        // would NPE on a null save() and fail context startup.
+        "bot.seed-demo-data=false"
+})
+// Every bot repository, mocked — see the class for why a JPA-less context needs them.
+@Import(BotRepositoryStubs.class)
 class ChatWebSocketIntegrationTest {
 
     private static final String SECRET = "test-only-integration-secret-at-least-32-bytes-long-xyz";
