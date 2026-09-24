@@ -102,6 +102,8 @@ bot:
   # side against the same clinic data.
   tool-username: ${BOT_TOOL_USERNAME:doctorassistant-tools}
   tool-display-name: ${BOT_TOOL_DISPLAY_NAME:DoctorAssistant (Tools)}
+  clinical-username: ${BOT_CLINICAL_USERNAME:clinical-note-extractor}
+  clinical-display-name: ${BOT_CLINICAL_DISPLAY_NAME:Clinical Note Extractor}
 
 server:
   port: 8080

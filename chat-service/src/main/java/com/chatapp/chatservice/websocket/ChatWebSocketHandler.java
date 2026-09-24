@@ -2,6 +2,7 @@ package com.chatapp.chatservice.websocket;
 
 import com.chatapp.chatservice.bot.routing.BotDirectory;
 import com.chatapp.chatservice.bot.routing.BotReply;
+import com.chatapp.chatservice.bot.clinical.ClinicalExtractorBotService;
 import com.chatapp.chatservice.bot.toolcalling.BotStreamListener;
 import com.chatapp.chatservice.bot.toolcalling.ToolCallingBotService;
 import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
@@ -86,6 +87,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final BotDirectory botDirectory;
     private final DoctorAssistantBotService doctorAssistantBotService;
     private final ToolCallingBotService toolCallingBotService;
+    private final ClinicalExtractorBotService clinicalExtractorBotService;
 
     public ChatWebSocketHandler(
             JwtValidator jwtValidator,
@@ -95,7 +97,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             ChatMessageService chatMessageService,
             BotDirectory botDirectory,
             DoctorAssistantBotService doctorAssistantBotService,
-            ToolCallingBotService toolCallingBotService) {
+            ToolCallingBotService toolCallingBotService,
+            ClinicalExtractorBotService clinicalExtractorBotService) {
         this.jwtValidator = jwtValidator;
         this.connectionRegistry = connectionRegistry;
         this.objectMapper = objectMapper;
@@ -104,6 +107,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.botDirectory = botDirectory;
         this.doctorAssistantBotService = doctorAssistantBotService;
         this.toolCallingBotService = toolCallingBotService;
+        this.clinicalExtractorBotService = clinicalExtractorBotService;
     }
 
     @Override
@@ -248,6 +252,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             switch (botKind.get()) {
                 case BOT -> handleBotMessage(session, senderId, request, sentAt);
                 case BOT_TOOL -> handleToolBotMessage(session, senderId, request, sentAt);
+                case CLINICAL_EXTRACTOR -> handleClinicalExtractorMessage(session, senderId, request, sentAt);
                 default -> log.warn("Recipient {} resolved to unroutable bot kind {}",
                         request.recipientId(), botKind.get());
             }
@@ -383,6 +388,28 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // was a preview of exactly this. The client replaces the bubble's text
         // with this content, so a dropped chunk, a client that ignores the
         // stream types, or a stream that died halfway all end up correct.
+        IncomingChatMessage incoming = new IncomingChatMessage(
+                "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
+        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));
+    }
+
+    private void handleClinicalExtractorMessage(
+            WebSocketSession session, String senderId, ChatMessageRequest request, Instant sentAt) throws IOException {
+        String botId = request.recipientId();
+        String replyMessageId = UUID.randomUUID().toString();
+        sendStreamEvent(session, BotStreamEvent.start(replyMessageId, botId));
+        sendStreamEvent(session, BotStreamEvent.status(replyMessageId, botId, "Preparing clinical note"));
+
+        BotReply reply = clinicalExtractorBotService.handleUserMessage(
+                senderId, botId, request.messageId(), request.content(), sentAt,
+                replyMessageId, streamListenerFor(session, replyMessageId, botId));
+
+        Instant repliedAt = Instant.now();
+        chatMessageService.persistBotConversationMessage(
+                reply.messageId(), botId, senderId, reply.content(), repliedAt);
+        chatMessageService.markDelivered(request.messageId());
+        sendDoubleTickIfConnected(senderId, request.messageId());
+
         IncomingChatMessage incoming = new IncomingChatMessage(
                 "incoming_message", reply.messageId(), botId, reply.content(), repliedAt);
         session.sendMessage(new TextMessage(objectMapper.writeValueAsString(incoming)));

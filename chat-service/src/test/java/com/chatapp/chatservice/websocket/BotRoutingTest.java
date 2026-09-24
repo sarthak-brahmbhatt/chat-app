@@ -2,8 +2,10 @@ package com.chatapp.chatservice.websocket;
 
 import com.chatapp.chatservice.bot.routing.BotDirectory;
 import com.chatapp.chatservice.bot.routing.BotReply;
+import com.chatapp.chatservice.bot.clinical.ClinicalExtractorBotService;
 import com.chatapp.chatservice.bot.promptstuffing.DoctorAssistantBotService;
 import com.chatapp.chatservice.bot.toolcalling.ToolCallingBotService;
+import com.chatapp.chatservice.bot.toolcalling.BotStreamListener;
 import com.chatapp.chatservice.dto.IncomingChatMessage;
 import com.chatapp.chatservice.entity.UserType;
 import com.chatapp.chatservice.dto.TickAck;
@@ -61,6 +63,7 @@ class BotRoutingTest {
     private static final String SECRET = "test-only-bot-routing-secret-at-least-32-bytes-long-xyz";
     private static final String USER_ID = "42";
     private static final String BOT_ID = "7";
+    private static final String CLINICAL_BOT_ID = "8";
 
     @Mock
     private KafkaTemplate<String, com.chatapp.chatservice.kafka.ChatTopicEvent> kafkaTemplate;
@@ -76,6 +79,9 @@ class BotRoutingTest {
 
     @Mock
     private ToolCallingBotService toolCallingBotService;
+
+    @Mock
+    private ClinicalExtractorBotService clinicalExtractorBotService;
 
     @Mock
     private WebSocketSession session;
@@ -99,11 +105,13 @@ class BotRoutingTest {
         // botKindOf, not isBot: with two bots answering, the handler needs to
         // know WHICH one, so a boolean is no longer enough to route on.
         lenient().when(botDirectory.botKindOf(BOT_ID)).thenReturn(Optional.of(UserType.BOT));
+        lenient().when(botDirectory.botKindOf(CLINICAL_BOT_ID))
+                .thenReturn(Optional.of(UserType.CLINICAL_EXTRACTOR));
 
         handler = new ChatWebSocketHandler(
                 jwtValidator, new ConnectionRegistry(), objectMapper,
                 new ChatMessagePublisher(kafkaTemplate), chatMessageService,
-                botDirectory, doctorAssistantBotService, toolCallingBotService);
+                botDirectory, doctorAssistantBotService, toolCallingBotService, clinicalExtractorBotService);
 
         sessionAttributes = new HashMap<>();
         when(session.getAttributes()).thenReturn(sessionAttributes);
@@ -221,6 +229,36 @@ class BotRoutingTest {
         verifyNoInteractions(doctorAssistantBotService);
         verify(chatMessageService, never()).persistBotConversationMessage(
                 anyString(), anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void clinicalExtractor_streamsProgressAndReturnsJsonAsAnOrdinaryMessage() throws IOException {
+        when(clinicalExtractorBotService.handleUserMessage(
+                anyString(), anyString(), anyString(), anyString(), any(Instant.class),
+                anyString(), any(BotStreamListener.class)))
+                .thenAnswer(invocation -> {
+                    BotStreamListener listener = invocation.getArgument(6);
+                    listener.onStatus("Looking up ICD-10 codes");
+                    String replyId = invocation.getArgument(5);
+                    return new BotReply(replyId, "{\"encounter_id\":\"enc-1\"}");
+                });
+        authenticate();
+
+        handler.handleTextMessage(session, new TextMessage(
+                chatMessage("clinical-1", CLINICAL_BOT_ID, "Discharge summary text")));
+
+        List<TextMessage> messages = sentMessages();
+        assertThat(messages).anySatisfy(message ->
+                assertThat(message.getPayload()).contains("Looking up ICD-10 codes"));
+
+        IncomingChatMessage incoming = messages.stream()
+                .map(this::readIncoming)
+                .filter(message -> message != null && "incoming_message".equals(message.type()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(incoming.senderId()).isEqualTo(CLINICAL_BOT_ID);
+        assertThat(incoming.content()).isEqualTo("{\"encounter_id\":\"enc-1\"}");
+        verifyNoInteractions(kafkaTemplate);
     }
 
     private void stubBotReply(String content) {

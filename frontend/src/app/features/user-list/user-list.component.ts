@@ -27,7 +27,7 @@ export class UserListComponent implements OnInit {
    */
   readonly bots = computed(() => {
     const byType = (type: string) => this.users().filter((user) => user.userType === type);
-    return [...byType('BOT'), ...byType('BOT_TOOL')];
+    return [...byType('BOT'), ...byType('BOT_TOOL'), ...byType('CLINICAL_EXTRACTOR')];
   });
 
   /** Everyone else, in the order the API returned them. */
@@ -41,11 +41,13 @@ export class UserListComponent implements OnInit {
    * assistant is which mid-conversation.
    */
   botSubtitle(user: UserSummary): string {
+    if (user.userType === 'CLINICAL_EXTRACTOR') return 'Clinical extraction';
     return user.userType === 'BOT_TOOL' ? 'Tool calling' : 'Prompt stuffing';
   }
 
   /** Drives the accent colour; see the .bot-1 / .bot-2 rules in styles.css. */
   botAccentClass(user: UserSummary): string {
+    if (user.userType === 'CLINICAL_EXTRACTOR') return 'bot-3';
     return user.userType === 'BOT_TOOL' ? 'bot-2' : 'bot-1';
   }
 

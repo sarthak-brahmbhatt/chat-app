@@ -79,14 +79,18 @@ export class ChatComponent implements OnInit, OnDestroy {
         return 'Prompt stuffing';
       case 'BOT_TOOL':
         return 'Tool calling';
+      case 'CLINICAL_EXTRACTOR':
+        return 'Clinical extraction';
       default:
         return null;
     }
   });
 
-  readonly recipientAccent = computed(() =>
-    this.recipientUserType() === 'BOT_TOOL' ? 'bot-2' : this.recipientUserType() === 'BOT' ? 'bot-1' : null,
-  );
+  readonly recipientAccent = computed(() => {
+    if (this.recipientUserType() === 'CLINICAL_EXTRACTOR') return 'bot-3';
+    if (this.recipientUserType() === 'BOT_TOOL') return 'bot-2';
+    return this.recipientUserType() === 'BOT' ? 'bot-1' : null;
+  });
   readonly bubbles = signal<ChatBubble[]>([]);
   readonly hasMoreHistory = signal(true);
   readonly loadingOlder = signal(false);

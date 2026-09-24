@@ -42,6 +42,17 @@ services:
       timeout: 5s
       retries: 5
 
+  # Searchable ICD-10, CPT, and quality-measure reference data for the
+  # clinical note extractor. The Python ingestion command will populate it.
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    container_name: chat-app-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
   kafka:
     image: apache/kafka:4.3.1
     hostname: kafka
@@ -289,6 +300,7 @@ services:
       # message instead of the container failing to start. See .env.example.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      CLINICAL_EXTRACTOR_URL: http://clinical-extractor-service:8000
     depends_on:
       mysql:
         condition: service_healthy
@@ -300,7 +312,42 @@ services:
       # healthcheck comment on user-service above for what it prevents.
       user-service:
         condition: service_healthy
+      clinical-extractor-service:
+        condition: service_healthy
+
+  # Separate Python service for one-shot clinical note extraction. The chat
+  # service calls its streaming endpoint for the Clinical Note Extractor bot.
+  clinical-extractor-service:
+    build: ./clinical-extractor-service
+    container_name: chat-app-clinical-extractor
+    restart: unless-stopped
+    ports:
+      - "8090:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${CLINICAL_OPENAI_MODEL:-gpt-4o}
+      OPENAI_EMBEDDING_MODEL: ${CLINICAL_EMBEDDING_MODEL:-text-embedding-3-small}
+      QDRANT_URL: http://qdrant:6333
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: chatappdb
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+    volumes:
+      - ./clinical-extractor-service/resources:/app/resources
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      mysql:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
 
 volumes:
   mysql-data:
   frontend-node-modules:
+  qdrant-data:

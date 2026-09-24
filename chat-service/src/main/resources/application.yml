@@ -113,6 +113,7 @@ bot:
   username: ${BOT_USERNAME:doctorassistant}
   # Must match user-service's bot.tool-username — same drift hazard as above.
   tool-username: ${BOT_TOOL_USERNAME:doctorassistant-tools}
+  clinical-username: ${BOT_CLINICAL_USERNAME:clinical-note-extractor}
   clinic-name: ${BOT_CLINIC_NAME:Super Clinic}
   # How far ahead §6.1's prompt stuffing reaches when injecting existing bookings.
   # Deliberately small: this is Version 1's naive "put everything in the prompt"
@@ -139,6 +140,10 @@ bot:
   # Separate switch because it is the bulkier of the two — roughly 6KB per round
   # against one prompt per turn — so it can be turned off on its own.
   log-rounds: ${BOT_LOG_ROUNDS:true}
+
+clinical-extractor:
+  base-url: ${CLINICAL_EXTRACTOR_URL:http://localhost:8090}
+  timeout-seconds: ${CLINICAL_EXTRACTOR_TIMEOUT_SECONDS:180}
 
 server:
   port: 8080

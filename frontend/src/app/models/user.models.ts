@@ -6,7 +6,7 @@
  * a flat alphabetical list makes the one you want hard to find and the two
  * of them hard to tell apart mid-demo.
  */
-export type UserType = 'USER' | 'BOT' | 'BOT_TOOL';
+export type UserType = 'USER' | 'BOT' | 'BOT_TOOL' | 'CLINICAL_EXTRACTOR';
 
 export interface UserSummary {
   id: number;

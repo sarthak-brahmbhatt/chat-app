@@ -1,0 +1,289 @@
+{
+  "info": {
+    "name": "OpenAI Playground — Responses vs Chat Completions",
+    "description": "Hands-on collection for the DoctorAssistant bot (CLAUDE.md 3.9 / 3.10).\n\nFolder A is the **Responses API** — what both bots actually use.\nFolder B is **Chat Completions** — the alternative, shown doing the same job so the difference is visible rather than described.\n\n## Setup\n\n1. Open the collection's **Variables** tab.\n2. Paste your key into `openai_api_key` (CURRENT VALUE column only — that column is not exported, so the key never leaves your machine).\n3. Run requests top to bottom within a folder. Later requests reuse ids captured by earlier ones.\n\n## What to watch\n\n- `usage.input_tokens` on every response. That is the number `bot_token_usage` records.\n- In **A2**, the request body carries only the new message — but `usage.input_tokens` still bills for the whole conversation. `previous_response_id` saves upload, not tokens.\n- In **B2**, the request body carries the entire transcript. Same tokens, much bigger upload, and the transcript is yours to store.\n- In **A4 vs B4**, compare what you have to hand-assemble to return a tool result.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      { "key": "token", "value": "{{openai_api_key}}", "type": "string" }
+    ]
+  },
+  "variable": [
+    { "key": "base_url", "value": "https://api.openai.com/v1", "type": "string" },
+    { "key": "openai_api_key", "value": "", "type": "string" },
+    { "key": "model", "value": "gpt-4o-mini", "type": "string" },
+    { "key": "previous_response_id", "value": "", "type": "string" },
+    { "key": "tool_response_id", "value": "", "type": "string" },
+    { "key": "call_id", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "A · Responses API (what the bot uses)",
+      "description": "The API both DoctorAssistant versions call. Stateful: OpenAI keeps the conversation when `store` is true, and you refer back to it with `previous_response_id`.",
+      "item": [
+        {
+          "name": "A1 · Basic call",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('previous_response_id', r.id);",
+                  "console.log('response id →', r.id);",
+                  "console.log('input tokens →', r.usage && r.usage.input_tokens);",
+                  "pm.test('got a response id', () => pm.expect(r.id).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/responses", "host": ["{{base_url}}"], "path": ["responses"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are the appointment assistant for Willow Lane Clinic. Be warm and brief. Plain text only, no markdown.\",\n  \"input\": \"hi\",\n  \"store\": true\n}"
+            },
+            "description": "Maps to `OpenAiToolCallingBrain.respond()`'s first call, minus the tools.\n\n`instructions` is the system prompt. `input` is the user's message. `store: true` is what makes the response id reusable in A2.\n\nThe test script saves `id` into `previous_response_id` for you."
+          }
+        },
+        {
+          "name": "A2 · Chained call (previous_response_id)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('previous_response_id', r.id);",
+                  "console.log('input tokens →', r.usage && r.usage.input_tokens,",
+                  "            '(note: higher than A1, even though you sent less)');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/responses", "host": ["{{base_url}}"], "path": ["responses"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are the appointment assistant for Willow Lane Clinic. Be warm and brief. Plain text only, no markdown.\",\n  \"previous_response_id\": \"{{previous_response_id}}\",\n  \"input\": \"what did I just say to you?\",\n  \"store\": true\n}"
+            },
+            "description": "**The lesson request.** The body contains no history at all — just a pointer and the new message. The model still answers correctly, because OpenAI holds the transcript.\n\nNow look at `usage.input_tokens`: **higher than A1**. You uploaded less and were billed more. That is the whole truth about `previous_response_id` — it saves bandwidth and bookkeeping, never tokens.\n\nThis is `bot_conversation_state.last_response_id` in action.\n\n**Also try:** delete `instructions` from this body and re-send. The model forgets the plain-text rule, because instructions apply to ONE call and are not carried by the chain. That is the exact bug that made `OpenAiToolCallingBrain` re-send them every round."
+          }
+        },
+        {
+          "name": "A3 · With tools — round 1 (model asks)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('tool_response_id', r.id);",
+                  "const call = (r.output || []).find(o => o.type === 'function_call');",
+                  "if (call) {",
+                  "  pm.collectionVariables.set('call_id', call.call_id);",
+                  "  console.log('model wants →', call.name, call.arguments);",
+                  "} else {",
+                  "  console.log('no function call this time — try a more specific question');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/responses", "host": ["{{base_url}}"], "path": ["responses"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are the appointment assistant for Willow Lane Clinic. Today is 2026-09-02 (Wednesday). Never state an available time a tool has not returned. Plain text only.\",\n  \"input\": \"any cardiology slots tomorrow?\",\n  \"store\": true,\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"name\": \"get_available_slots\",\n      \"description\": \"Free appointment slots on one date. Already excludes booked, blocked and inactive doctors — what it returns is bookable.\",\n      \"strict\": true,\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"date\": { \"type\": \"string\", \"description\": \"The date as YYYY-MM-DD.\" },\n          \"specialty\": { \"type\": [\"string\", \"null\"], \"description\": \"Restrict to one specialty, or null for all.\" }\n        },\n        \"required\": [\"date\", \"specialty\"],\n        \"additionalProperties\": false\n      }\n    }\n  ]\n}"
+            },
+            "description": "This is `ClinicTool.asFunctionTool()` written out by hand — the exact JSON your enum builds.\n\nThe response's `output` array will contain a `function_call` item, not a message:\n\n```json\n{ \"type\": \"function_call\", \"call_id\": \"fc_...\",\n  \"name\": \"get_available_slots\",\n  \"arguments\": \"{\\\"date\\\":\\\"2026-09-03\\\",\\\"specialty\\\":\\\"Cardiology\\\"}\" }\n```\n\n**`arguments` is a string.** The model wrote text; nothing executed. That is the whole point.\n\nNote `strict: true` requires EVERY property listed in `required` — which is why an optional argument is typed `[\"string\", \"null\"]` rather than left out.\n\nThe test script captures `call_id` for A4."
+          }
+        },
+        {
+          "name": "A4 · With tools — round 2 (you send the result back)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "pm.collectionVariables.set('tool_response_id', r.id);",
+                  "const more = (r.output || []).some(o => o.type === 'function_call');",
+                  "console.log(more ? 'model wants ANOTHER tool → this is round 3' : 'model replied → loop ends here');",
+                  "console.log('input tokens →', r.usage && r.usage.input_tokens);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/responses", "host": ["{{base_url}}"], "path": ["responses"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are the appointment assistant for Willow Lane Clinic. Today is 2026-09-02 (Wednesday). Never state an available time a tool has not returned. Plain text only.\",\n  \"previous_response_id\": \"{{tool_response_id}}\",\n  \"store\": true,\n  \"input\": [\n    {\n      \"type\": \"function_call_output\",\n      \"call_id\": \"{{call_id}}\",\n      \"output\": \"{\\\"date\\\":\\\"2026-09-03\\\",\\\"weekday\\\":\\\"THURSDAY\\\",\\\"available_slots\\\":[{\\\"availability_id\\\":14,\\\"doctor\\\":\\\"Dr. Sanjay Rao\\\",\\\"specialty\\\":\\\"Cardiology\\\",\\\"start\\\":\\\"10:00\\\",\\\"end\\\":\\\"10:30\\\"},{\\\"availability_id\\\":15,\\\"doctor\\\":\\\"Dr. Sanjay Rao\\\",\\\"specialty\\\":\\\"Cardiology\\\",\\\"start\\\":\\\"11:30\\\",\\\"end\\\":\\\"12:00\\\"}]}\"\n    }\n  ],\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"name\": \"get_available_slots\",\n      \"description\": \"Free appointment slots on one date. Already excludes booked, blocked and inactive doctors — what it returns is bookable.\",\n      \"strict\": true,\n      \"parameters\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"date\": { \"type\": \"string\", \"description\": \"The date as YYYY-MM-DD.\" },\n          \"specialty\": { \"type\": [\"string\", \"null\"], \"description\": \"Restrict to one specialty, or null for all.\" }\n        },\n        \"required\": [\"date\", \"specialty\"],\n        \"additionalProperties\": false\n      }\n    }\n  ]\n}"
+            },
+            "description": "You are playing the part of `ClinicToolExecutor` — the JSON in `output` is what your SQL would have returned.\n\nFour things worth noticing:\n\n1. **`call_id` must match** what round 1 sent. Get it wrong and the API rejects the whole request.\n2. **`output` is a string**, not an object — a JSON document inside a JSON string.\n3. **`tools` is sent again.** The model needs the menu on every round.\n4. **`instructions` is sent again.** Drop it and watch the reply change format — this is the bug from `OpenAiToolCallingBrain`'s comment at line 182.\n\nThe response should now be plain text with no `function_call` — that is `calls.isEmpty()` becoming true and the `while` loop returning."
+          }
+        },
+        {
+          "name": "A5 · Structured output (Version 1's shape)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/responses", "host": ["{{base_url}}"], "path": ["responses"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are the appointment assistant for Willow Lane Clinic. Today is 2026-09-02.\\n\\nDOCTORS\\n- Dr. Sanjay Rao — Cardiology — WORKS: THURSDAY, FRIDAY\\n\\nWORKING HOURS\\n- Dr. Sanjay Rao THURSDAY 10:00-10:30 (id 14)\\n- Dr. Sanjay Rao THURSDAY 11:30-12:00 (id 15)\\n\\nSLOTS ALREADY TAKEN — unavailable; owner unknown to you\\n- 2026-09-03 10:00 Dr. Sanjay Rao\\n\\nTHIS PATIENT'S APPOINTMENTS — the ONLY ones that are theirs\\n- none\\n\\nSet action to BOOK only when the patient has clearly confirmed.\",\n  \"input\": \"book me with Dr Rao at 11:30 tomorrow, yes please go ahead\",\n  \"store\": true,\n  \"text\": {\n    \"format\": {\n      \"type\": \"json_schema\",\n      \"name\": \"BotDecision\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"reply_to_user\": { \"type\": \"string\" },\n          \"action\": { \"type\": \"string\", \"enum\": [\"BOOK\", \"NONE\"] },\n          \"availability_id\": { \"type\": [\"integer\", \"null\"] },\n          \"booked_for_date\": { \"type\": [\"string\", \"null\"] }\n        },\n        \"required\": [\"reply_to_user\", \"action\", \"availability_id\", \"booked_for_date\"],\n        \"additionalProperties\": false\n      }\n    }\n  }\n}"
+            },
+            "description": "**Version 1 in miniature.** Everything the model could need is jammed into `instructions` — doctors, hours, bookings, and the two separately-headed lists from the cross-patient leak fix.\n\nThe reply comes back as JSON matching `BotDecision`. `action: \"BOOK\"` is the model *requesting* a write; Java then re-validates and either books or throws the model's text away.\n\nThis is what the Java SDK generates for you from the record via `builder.text(BotDecision.class)`.\n\n**Try this:** paste your real 15,000-character prompt from `bot_prompt_log.system_prompt` in here and compare `usage.input_tokens` against A3."
+          }
+        },
+        {
+          "name": "A6 · Streaming (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "text/event-stream" }
+            ],
+            "url": { "raw": "{{base_url}}/responses", "host": ["{{base_url}}"], "path": ["responses"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"instructions\": \"You are the appointment assistant for Willow Lane Clinic.\",\n  \"input\": \"tell me in three sentences what you can help with\",\n  \"stream\": true,\n  \"store\": true\n}"
+            },
+            "description": "One extra field — `\"stream\": true` — and the response becomes `text/event-stream`.\n\nPostman shows the raw SSE frames. Look for:\n\n- `response.created` — first, carries the id\n- `response.output_text.delta` — dozens of these, each a few characters. **These are the `bot_stream_delta` frames in your DevTools screenshot.**\n- `response.completed` — last, carries the ENTIRE finished response including `usage`\n\nThat last one is why `send()` can return a plain `Response` while streaming: the completed event hands over everything the blocking call would have."
+          }
+        },
+        {
+          "name": "A7 · Retrieve a stored response",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/responses/{{previous_response_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["responses", "{{previous_response_id}}"]
+            },
+            "description": "Fetch a response by id. Proof that `store: true` really does keep it server-side.\n\n**Try this:** paste an OLD `last_response_id` from your `bot_conversation_state` table. If it 404s with `param: previous_response_id`, you have just reproduced `ExpiredConversationException` by hand — the sawtooth drops in the cost chart are exactly this.\n\nNote what you CANNOT do here: query it, search it, or aggregate over it. That is why long-term memory (\"remembers your dizziness from last week\") needs your own table, not this."
+          }
+        },
+        {
+          "name": "A8 · Delete a stored response",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/responses/{{previous_response_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["responses", "{{previous_response_id}}"]
+            },
+            "description": "Removes it from OpenAI's side. Run A7 afterwards to see the 404.\n\nUseful for deliberately breaking a chain and watching your app's recovery path fire."
+          }
+        }
+      ]
+    },
+    {
+      "name": "B · Chat Completions API (the alternative)",
+      "description": "The same jobs, done the portable way. Stateless: there is no `previous_response_id`, so YOU carry the transcript in `messages` on every single request.\n\nThis is what Spring AI targets, and what you would be writing if the bot had to run against Azure, Bedrock or a local model.",
+      "item": [
+        {
+          "name": "B1 · Basic call",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/chat/completions", "host": ["{{base_url}}"], "path": ["chat", "completions"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"You are the appointment assistant for Willow Lane Clinic. Be warm and brief. Plain text only, no markdown.\" },\n    { \"role\": \"user\", \"content\": \"hi\" }\n  ]\n}"
+            },
+            "description": "Compare with A1.\n\n- `instructions` → a `system` **message inside the array**\n- `input` → a `user` message\n- no `store`, because nothing is stored\n\nThe reply lives at `choices[0].message.content`, and usage at `usage.prompt_tokens` (not `input_tokens` — different field names for the same thing)."
+          }
+        },
+        {
+          "name": "B2 · Multi-turn — you carry the transcript",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/chat/completions", "host": ["{{base_url}}"], "path": ["chat", "completions"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"You are the appointment assistant for Willow Lane Clinic. Be warm and brief. Plain text only, no markdown.\" },\n    { \"role\": \"user\", \"content\": \"hi\" },\n    { \"role\": \"assistant\", \"content\": \"Hello and welcome to Willow Lane Clinic. How can I help you today?\" },\n    { \"role\": \"user\", \"content\": \"what did I just say to you?\" }\n  ]\n}"
+            },
+            "description": "**The direct comparison to A2.** Same question, same answer — but look at the body.\n\nEverything the conversation has ever contained is here, and you sent all of it. In A2 you sent one id and one sentence.\n\n`usage.prompt_tokens` will be close to A2's `input_tokens`, because **the billing is the same**. What differs is:\n\n- the upload size\n- who stores the transcript (you)\n- what happens when it outgrows the context window (your problem — see windowing)\n\nAt turn 60 of your conversation `3:8`, this array would hold 120 messages.\n\n**Note the system message is `messages[0]`.** If Version 1 ran on this API, its 15,000-character clinic snapshot would sit here — and you would have to rewrite index 0 every turn or accumulate contradictory copies of what is booked."
+          }
+        },
+        {
+          "name": "B3 · With tools — round 1 (model asks)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const m = pm.response.json().choices[0].message;",
+                  "if (m.tool_calls && m.tool_calls.length) {",
+                  "  console.log('tool_call_id →', m.tool_calls[0].id);",
+                  "  console.log('arguments   →', m.tool_calls[0].function.arguments);",
+                  "  console.log('copy the assistant message verbatim into B4');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/chat/completions", "host": ["{{base_url}}"], "path": ["chat", "completions"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"You are the appointment assistant for Willow Lane Clinic. Today is 2026-09-02 (Wednesday). Never state an available time a tool has not returned. Plain text only.\" },\n    { \"role\": \"user\", \"content\": \"any cardiology slots tomorrow?\" }\n  ],\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_available_slots\",\n        \"description\": \"Free appointment slots on one date. Already excludes booked, blocked and inactive doctors.\",\n        \"strict\": true,\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"date\": { \"type\": \"string\", \"description\": \"The date as YYYY-MM-DD.\" },\n            \"specialty\": { \"type\": [\"string\", \"null\"], \"description\": \"Restrict to one specialty, or null for all.\" }\n          },\n          \"required\": [\"date\", \"specialty\"],\n          \"additionalProperties\": false\n        }\n      }\n    }\n  ]\n}"
+            },
+            "description": "Same tool, **different envelope**. Compare the shape with A3:\n\n| | Responses (A3) | Chat Completions (B3) |\n|---|---|---|\n| tool shape | `{type, name, description, parameters}` flat | `{type, function: {name, ...}}` nested |\n| where the call lands | `output[]` as `function_call` | `choices[0].message.tool_calls[]` |\n| the id field | `call_id` | `id` |\n\nA port between the two is not a config change. This is exactly the rewrite cost CLAUDE.md §5 names for a provider swap."
+          }
+        },
+        {
+          "name": "B4 · With tools — round 2 (assistant + tool messages)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/chat/completions", "host": ["{{base_url}}"], "path": ["chat", "completions"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"You are the appointment assistant for Willow Lane Clinic. Today is 2026-09-02 (Wednesday). Never state an available time a tool has not returned. Plain text only.\" },\n    { \"role\": \"user\", \"content\": \"any cardiology slots tomorrow?\" },\n    {\n      \"role\": \"assistant\",\n      \"content\": null,\n      \"tool_calls\": [\n        {\n          \"id\": \"PASTE_tool_call_id_FROM_B3\",\n          \"type\": \"function\",\n          \"function\": {\n            \"name\": \"get_available_slots\",\n            \"arguments\": \"{\\\"date\\\":\\\"2026-09-03\\\",\\\"specialty\\\":\\\"Cardiology\\\"}\"\n          }\n        }\n      ]\n    },\n    {\n      \"role\": \"tool\",\n      \"tool_call_id\": \"PASTE_tool_call_id_FROM_B3\",\n      \"content\": \"{\\\"date\\\":\\\"2026-09-03\\\",\\\"weekday\\\":\\\"THURSDAY\\\",\\\"available_slots\\\":[{\\\"availability_id\\\":14,\\\"doctor\\\":\\\"Dr. Sanjay Rao\\\",\\\"specialty\\\":\\\"Cardiology\\\",\\\"start\\\":\\\"10:00\\\",\\\"end\\\":\\\"10:30\\\"},{\\\"availability_id\\\":15,\\\"doctor\\\":\\\"Dr. Sanjay Rao\\\",\\\"specialty\\\":\\\"Cardiology\\\",\\\"start\\\":\\\"11:30\\\",\\\"end\\\":\\\"12:00\\\"}]}\"\n    }\n  ],\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_available_slots\",\n        \"description\": \"Free appointment slots on one date. Already excludes booked, blocked and inactive doctors.\",\n        \"strict\": true,\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"date\": { \"type\": \"string\", \"description\": \"The date as YYYY-MM-DD.\" },\n            \"specialty\": { \"type\": [\"string\", \"null\"], \"description\": \"Restrict to one specialty, or null for all.\" }\n          },\n          \"required\": [\"date\", \"specialty\"],\n          \"additionalProperties\": false\n        }\n      }\n    }\n  ]\n}"
+            },
+            "description": "**Replace both `PASTE_tool_call_id_FROM_B3` placeholders** with the id the B3 console logged.\n\nThis is the request that shows the real cost of not having `previous_response_id`. Compare it to A4:\n\n- A4 sent: a pointer, ONE `function_call_output`, the tools.\n- B4 sends: the system message, the user message, **the assistant's own tool-call message echoed back verbatim**, the `tool` message, and the tools.\n\nAnd the pairing rules are strict:\n\n1. Every `tool_calls` entry needs a matching `role: \"tool\"` message.\n2. They pair by `tool_call_id` — `id` on the assistant side, `tool_call_id` on the tool side.\n3. Order matters: assistant message first, then its tool results.\n\nBreak any of the three and the API 400s. **That bookkeeping is what `previous_response_id` does for you** — not the tokens."
+          }
+        },
+        {
+          "name": "B5 · Streaming",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "text/event-stream" }
+            ],
+            "url": { "raw": "{{base_url}}/chat/completions", "host": ["{{base_url}}"], "path": ["chat", "completions"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [\n    { \"role\": \"system\", \"content\": \"You are the appointment assistant for Willow Lane Clinic.\" },\n    { \"role\": \"user\", \"content\": \"tell me in three sentences what you can help with\" }\n  ],\n  \"stream\": true,\n  \"stream_options\": { \"include_usage\": true }\n}"
+            },
+            "description": "Same idea as A6, different frames. Chat Completions streams `choices[0].delta.content` chunks and finishes with `data: [DONE]`.\n\n**Note `stream_options.include_usage`.** Without it, a streamed Chat Completions response gives you NO token counts at all. The Responses API's `response.completed` event carries `usage` unconditionally — which is why `OpenAiToolCallingBrain` can stream and still fill in `bot_token_usage` without asking for anything extra."
+          }
+        }
+      ]
+    }
+  ]
+}

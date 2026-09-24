@@ -16,5 +16,8 @@ public enum UserType {
     BOT,
 
     /** The Version 2 tool-calling bot. A second bot user, alongside BOT, not replacing it. */
-    BOT_TOOL
+    BOT_TOOL,
+
+    /** One-shot clinical note extraction through the Python service. */
+    CLINICAL_EXTRACTOR
 }

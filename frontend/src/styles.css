@@ -26,6 +26,8 @@
   --bot-1-soft: #fdf1dc;
   --bot-2: #0f7b83;
   --bot-2-soft: #dcf0f1;
+  --bot-3: #a33a52;
+  --bot-3-soft: #f8e5ea;
   --radius: 10px;
 }
 
@@ -259,6 +261,19 @@ button.secondary {
   background: var(--bot-2-soft);
 }
 
+.user-list-item.bot-3 .avatar {
+  background: var(--bot-3-soft);
+  color: var(--bot-3);
+}
+
+.user-list-item.bot-3 .entry-sub {
+  color: var(--bot-3);
+}
+
+.user-list-item.bot-3.active {
+  background: var(--bot-3-soft);
+}
+
 .chat-panel {
   flex: 1;
   display: flex;
@@ -346,6 +361,11 @@ button.secondary {
 .header-badge.bot-2 {
   background: var(--bot-2-soft);
   color: var(--bot-2);
+}
+
+.header-badge.bot-3 {
+  background: var(--bot-3-soft);
+  color: var(--bot-3);
 }
 
 .back-link {

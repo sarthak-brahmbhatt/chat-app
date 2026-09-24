@@ -51,11 +51,13 @@ public class BotDirectory {
     public BotDirectory(
             AppUserRepository appUserRepository,
             @Value("${bot.username}") String botUsername,
-            @Value("${bot.tool-username}") String toolBotUsername) {
+            @Value("${bot.tool-username}") String toolBotUsername,
+            @Value("${bot.clinical-username}") String clinicalBotUsername) {
         this.appUserRepository = appUserRepository;
         this.usernamesByKind = Map.of(
                 UserType.BOT, botUsername,
-                UserType.BOT_TOOL, toolBotUsername);
+                UserType.BOT_TOOL, toolBotUsername,
+                UserType.CLINICAL_EXTRACTOR, clinicalBotUsername);
     }
 
     /**

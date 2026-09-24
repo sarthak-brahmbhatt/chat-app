@@ -47,5 +47,8 @@ public enum UserType {
      * the same tables without colliding — and the token cost of one can be
      * compared directly against the other.
      */
-    BOT_TOOL
+    BOT_TOOL,
+
+    /** One-shot clinical note extraction through the Python service. */
+    CLINICAL_EXTRACTOR
 }

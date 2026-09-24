@@ -46,6 +46,8 @@ public class BotUserSeeder implements ApplicationRunner {
     private final String botDisplayName;
     private final String toolBotUsername;
     private final String toolBotDisplayName;
+    private final String clinicalBotUsername;
+    private final String clinicalBotDisplayName;
 
     public BotUserSeeder(
             UserRepository userRepository,
@@ -53,13 +55,17 @@ public class BotUserSeeder implements ApplicationRunner {
             @Value("${bot.username}") String botUsername,
             @Value("${bot.display-name}") String botDisplayName,
             @Value("${bot.tool-username}") String toolBotUsername,
-            @Value("${bot.tool-display-name}") String toolBotDisplayName) {
+            @Value("${bot.tool-display-name}") String toolBotDisplayName,
+            @Value("${bot.clinical-username}") String clinicalBotUsername,
+            @Value("${bot.clinical-display-name}") String clinicalBotDisplayName) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.botUsername = botUsername;
         this.botDisplayName = botDisplayName;
         this.toolBotUsername = toolBotUsername;
         this.toolBotDisplayName = toolBotDisplayName;
+        this.clinicalBotUsername = clinicalBotUsername;
+        this.clinicalBotDisplayName = clinicalBotDisplayName;
     }
 
     @Override
@@ -70,6 +76,7 @@ public class BotUserSeeder implements ApplicationRunner {
         // rather than described.
         seedBot(botUsername, botDisplayName, UserType.BOT);
         seedBot(toolBotUsername, toolBotDisplayName, UserType.BOT_TOOL);
+        seedBot(clinicalBotUsername, clinicalBotDisplayName, UserType.CLINICAL_EXTRACTOR);
     }
 
     private void seedBot(String username, String displayName, UserType type) {
